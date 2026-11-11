@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
@@ -366,6 +366,7 @@ async function ocr(img, onProgress) {
 }
 /* Extraction montant / date / magasin / catégorie depuis le texte du ticket */
 function parseNumbers(line) {
+  line = line.replace(/[\d ,.]+\s*%/g, " "); // les pourcentages ne sont pas des montants
   const out = []; const re = /\d{1,3}(?:[ . ]\d{3})+(?!\d)|\d+(?:[,.]\d{1,2})?(?!\d)/g; let m;
   while ((m = re.exec(line))) {
     const s = m[0]; let n;
@@ -403,18 +404,83 @@ function findDate(text) {
   const good = cands.filter(c => c[1]).sort((a, b) => a[0] - b[0]);
   return good.length ? good[0][1] : null;
 }
+/* Enseignes connues (Nouvelle-Calédonie) : servent à reconnaître le magasin malgré les erreurs de lecture.
+   Les mots-clés des catégories (Réglages) sont aussi utilisés. */
+const SHOPS = ['Carrefour Market', 'Carrefour', 'Champion', 'Géant Casino', 'Casino', 'Super U', 'Hyper U', 'Leader Price', 'Korail',
+  'Johnston', 'Ballande', 'Pacific Energy', 'Total', 'Mobil', 'Pharmacie', 'Mr Bricolage', 'Bricorama', 'Pacific Food', 'Discount'];
+const compact = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/[^A-Z]/g, '');
+function lev(a, b) {
+  const m = a.length, n = b.length; let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) { const cur = [i]; for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); prev = cur; }
+  return prev[n];
+}
+/* Cherche le mot k dans la ligne en acceptant ~1 erreur sur 4 lettres.
+   Renvoie la meilleure correspondance {start, end, d} (en lettres) ou null. */
+function fuzzyMatch(line, k) {
+  const L = compact(line), K = compact(k); if (K.length < 4 || L.length < K.length - 1) return null;
+  const tol = Math.floor(K.length / 4); let best = null;
+  for (let len = K.length - 1; len <= K.length + 1; len++)
+    for (let i = 0; i + len <= L.length; i++) {
+      const d = lev(L.substr(i, len), K) + (len !== K.length ? 0.5 : 0);
+      if (d <= tol && (!best || d < best.d || (d === best.d && i < best.start))) best = { start: i, end: i + len, d };
+    }
+  return best;
+}
+const fuzzyIn = (line, k) => fuzzyMatch(line, k) ? 1 : -1;
+const HEADER_JUNK = /(t[ée]l\b|t[ée]l\s*:|ridet|rc\s|siret|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|\d+h\d*|horaire|bienvenue|merci|www|\S@\S|\brue\b|route|bp\s?\d|bp\b|nou[mn][ée]a)/i;
+function findStore(lines) {
+  const head = lines.slice(0, 8);
+  const names = SHOPS.concat(S.categories.flatMap(c => (c.keywords || '').split(',').map(k => k.trim()).filter(k => k.length >= 4 && k.toLowerCase() !== 'total')));
+  // 1) une enseigne connue dans l'en-tête : on garde l'enseigne bien écrite + la suite de la ligne (ex. « Champion Robinson »)
+  for (const l of head) {
+    if (HEADER_JUNK.test(l) || (/(total|payer|montant|carte|cb\b)/i.test(l) && /\d/.test(l))) continue;
+    const hit = names.map(n => ({ n, m: fuzzyMatch(l, n) })).filter(x => x.m)
+      .sort((a, b) => a.m.start - b.m.start || compact(b.n).length - compact(a.n).length)[0];
+    if (hit) {
+      const words = l.split(/\s+/); let acc = 0; const rest = [];
+      for (const w of words) { const c = compact(w).length; if (acc >= hit.m.end && c) rest.push(w); acc += c; }
+      const tail = rest.filter(w => /^[\p{L}'-]{3,}$/u.test(w) && !fuzzyMatch(w, hit.n)).map(w => w[0].toUpperCase() + w.slice(1).toLowerCase());
+      const brand = hit.n.toLowerCase().replace(/(^|\s)\p{L}/gu, c => c.toUpperCase());
+      return { name: [brand, ...tail].join(' ').slice(0, 30), known: hit.n };
+    }
+  }
+  // 2) sinon la ligne d'en-tête la plus « propre » (mots de 3 lettres ou plus), en retirant les débris de logo
+  let best = null, bestScore = 0;
+  head.forEach((l, i) => {
+    if (HEADER_JUNK.test(l) || /\d{3,}/.test(l)) return;
+    const words = l.split(/\s+/).filter(w => /^[\p{L}'&-]{3,}$/u.test(w));
+    const score = words.reduce((s, w) => s + w.length, 0) - i; // un peu de bonus aux premières lignes
+    if (words.length && score > bestScore) { bestScore = score; best = words.join(' '); }
+  });
+  return best ? { name: best.slice(0, 30) } : null;
+}
 function parseReceipt(text) {
   const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean); const res = {};
-  const prio = /(total|net\s*[aà]\s*payer|[aà]\s*payer|montant|esp[eè]ces|carte|cb\b|xpf)/i, excl = /(sous[\s-]*total|tgc|tva|taxe|rendu|monnaie|[ée]conomi|remise|fid[ée]lit|points?)/i;
-  let cand = [];
-  lines.forEach(l => { if (prio.test(l) && !excl.test(l)) cand.push(...parseNumbers(l.replace(/\d{2}[\/.-]\d{2}[\/.-]\d{2,4}/g, ''))); });
-  if (!cand.length) lines.forEach(l => { if (!/\d{2}[\/.-]\d{2}[\/.-]\d{2,4}|t[ée]l|ridet|\d{2}[ .]\d{2}[ .]\d{2}$/i.test(l)) cand.push(...parseNumbers(l)); });
-  if (cand.length) res.amount = Math.max(...cand);
+  // Montant : on note chaque nombre candidat (lignes TOTAL / À PAYER / CB, nombres suivis de F ou XPF)
+  const prio = /(t?otal|net\s*[aà]\s*payer|[aà]\s*payer|montant|esp[eè]ces|carte|bancaire|cb\b|xpf)/i, excl = /(sous[\s-]*total|tgc|tva|taxe|hors\s*taxe|rendu|monnaie|[ée]conomi|remise|fid[ée]lit|points?|article)/i;
+  const score = new Map(); const add = (n, s) => score.set(n, (score.get(n) || 0) + s);
+  lines.forEach(l => {
+    if (excl.test(l) || /t[ée]l|ridet/i.test(l)) return;
+    const clean = l.replace(/\d{1,2}\s*[\/.-]\s*\d{1,2}\s*[\/.-]\s*\d{2,4}/g, ' ');
+    const isPrio = prio.test(l);
+    const isTotal = /(t?otal|[aà]\s*payer|net\s)/i.test(l);
+    parseNumbers(clean).forEach(n => { if (isPrio && n >= 10) add(n, isTotal ? 2.5 : 1.5); });
+    let m; const reF = /(\d{1,3}(?:[ . ]\d{3})+|\d+)\s*(?:F\b|F(?=\s|$)|XPF|CFP)/gi;
+    while ((m = reF.exec(clean))) { const n = parseInt(m[1].replace(/[ . ]/g, ''), 10); if (n >= 10 && n < 5000000) add(n, 2); }
+  });
+  if (score.size) {
+    res.amount = [...score.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0][0];
+  } else {
+    const cand = []; lines.forEach(l => { if (!/\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}|t[ée]l|ridet/i.test(l)) cand.push(...parseNumbers(l)); });
+    if (cand.length) res.amount = Math.max(...cand);
+  }
   const dt = findDate(text); if (dt) res.date = dt;
-  const store = lines.find(l => /[a-zA-Zéè]{3,}/.test(l) && l.length <= 40);
-  if (store) res.store = store.replace(/[^\p{L}\p{N} '&-]/gu, '').trim().slice(0, 30);
-  const low = text.toLowerCase();
-  const cat = S.categories.find(c => (c.keywords || '').split(',').map(k => k.trim().toLowerCase()).filter(Boolean).some(k => low.includes(k)));
+  const st = findStore(lines); if (st) res.store = st.name;
+  // Catégorie : d'abord d'après le magasin reconnu, puis d'après les mots-clés (lecture tolérante aux erreurs)
+  const kw = c => (c.keywords || '').split(',').map(k => k.trim()).filter(Boolean);
+  let cat = null;
+  if (st) cat = S.categories.find(c => kw(c).some(k => compact(st.name).includes(compact(k)) || (st.known && compact(st.known).includes(compact(k)))));
+  if (!cat) cat = S.categories.find(c => kw(c).some(k => k.toLowerCase() !== 'total' && (k.length >= 4 ? lines.some(l => fuzzyIn(l, k) >= 0) : text.toLowerCase().includes(k.toLowerCase()))));
   if (cat) res.categoryId = cat.id;
   return res;
 }
