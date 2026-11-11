@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
@@ -299,7 +299,7 @@ function viewSettings() {
     <label class="f"><span>Thème de l’affichage</span><select onchange="A.setTheme(this.value)">${[['auto','Automatique (comme le téléphone)'],['light','☀️ Clair'],['dark','🌙 Sombre']].map(([v,l])=>`<option value="${v}" ${(st.theme||'auto')===v?'selected':''}>${l}</option>`).join('')}</select></label>
     <label class="f"><span>Début du suivi (le budget est calculé à partir de cette date)</span><input type="date" value="${st.startDate}" onchange="A.setStart(this.value)"></label></div></div>`;
   h += `<div class="section"><h2>Sauvegarde Google Drive</h2><div class="list" style="padding:4px 14px 14px">
-    <label class="f"><span>Identifiant client Google (voir le guide d’installation)</span><input id="cid" value="${esc(st.clientId)}" placeholder="xxxxxxxx.apps.googleusercontent.com" onchange="A.setClientId(this.value)"></label>
+    <label class="f"><span>Identifiant client Google (voir le guide d’installation)</span><input id="cid" value="${esc(clientId())}" placeholder="xxxxxxxx.apps.googleusercontent.com"></label><button class="btn ghost block" onclick="A.setClientId($('#cid').value)">Enregistrer l’identifiant</button>${(window.BUDGET_CONFIG || {}).googleClientId ? '<p class="help">✅ Identifiant intégré à l’application (fichier config.js).</p>' : ''}
     <p class="help">Dernière sauvegarde : ${st.lastBackup ? new Date(st.lastBackup).toLocaleString('fr-FR') : 'jamais'}</p>
     <div id="drive-status" class="help"></div>
     <div class="btns"><button class="btn" onclick="A.backup()">☁️ Sauvegarder</button><button class="btn ghost" onclick="A.restore()">⤓ Restaurer</button></div>
@@ -467,13 +467,14 @@ async function handlePhoto(file) {
 
 /* ---------- Google Drive ---------- */
 let gToken = null, gExp = 0;
+const clientId = () => (S.settings.clientId || (window.BUDGET_CONFIG || {}).googleClientId || '').trim();
 async function token() {
-  if (!S.settings.clientId) throw new Error('Renseigne d’abord l’identifiant client Google dans Réglages (voir le guide).');
+  if (!clientId()) throw new Error('Renseigne d’abord l’identifiant client Google dans Réglages (voir le guide).');
   if (gToken && Date.now() < gExp) return gToken;
   if (!window.google || !google.accounts) await loadScript('https://accounts.google.com/gsi/client');
   return new Promise((res, rej) => {
     const c = google.accounts.oauth2.initTokenClient({
-      client_id: S.settings.clientId, scope: 'https://www.googleapis.com/auth/drive.file',
+      client_id: clientId(), scope: 'https://www.googleapis.com/auth/drive.file',
       callback: r => { if (r.error) return rej(new Error(r.error)); gToken = r.access_token; gExp = Date.now() + (r.expires_in - 60) * 1000; res(gToken); },
       error_callback: e => rej(new Error(e.message || e.type || 'Connexion Google annulée'))
     });
