@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.5.1';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
@@ -455,19 +455,30 @@ function findStore(lines) {
   return best ? { name: best.slice(0, 30) } : null;
 }
 function parseReceipt(text) {
-  const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean); const res = {};
+  const lines = text.split(/\n/).map(l => l.trim().replace(/(?<=\d)[oO](?=[\dF\s]|$)/g, '0')).filter(Boolean); const res = {};
   // Montant : on note chaque nombre candidat (lignes TOTAL / À PAYER / CB, nombres suivis de F ou XPF)
   const prio = /(t?otal|net\s*[aà]\s*payer|[aà]\s*payer|montant|esp[eè]ces|carte|bancaire|cb\b|xpf)/i, excl = /(sous[\s-]*total|tgc|tva|taxe|hors\s*taxe|rendu|monnaie|[ée]conomi|remise|fid[ée]lit|points?|article)/i;
   const score = new Map(); const add = (n, s) => score.set(n, (score.get(n) || 0) + s);
+  // Bloc des taxes (TGC / TVA / Hors Taxe) : on l'écarte, mais on s'en sert pour vérifier le total (HT + TGC = TTC)
+  const taxHead = /(hors\s*taxe|\bH\.?T\.?\b|\bTGC\b|\bTVA\b|taxe)/i, totalWord = /(t?otal|[aà]\s*payer|net\s)/i;
+  let taxRows = 0; const taxNums = [];
   lines.forEach(l => {
+    const isTax = taxHead.test(l) && !/[aà]\s*payer/i.test(l);
+    const header = isTax && parseNumbers(l).filter(n => n >= 10).length === 0; // ligne de titres de colonnes
+    if (isTax) taxRows = header ? 2 : 0; else if (taxRows > 0) taxRows--;
+    if (isTax || (taxRows > 0 && !prio.test(l))) { taxNums.push(...parseNumbers(l).filter(n => n >= 10)); return; }
     if (excl.test(l) || /t[ée]l|ridet/i.test(l)) return;
     const clean = l.replace(/\d{1,2}\s*[\/.-]\s*\d{1,2}\s*[\/.-]\s*\d{2,4}/g, ' ');
-    const isPrio = prio.test(l);
-    const isTotal = /(t?otal|[aà]\s*payer|net\s)/i.test(l);
+    const isPrio = prio.test(l), isTotal = totalWord.test(l);
     parseNumbers(clean).forEach(n => { if (isPrio && n >= 10) add(n, isTotal ? 2.5 : 1.5); });
     let m; const reF = /(\d{1,3}(?:[ . ]\d{3})+|\d+)\s*(?:F\b|F(?=\s|$)|XPF|CFP)/gi;
     while ((m = reF.exec(clean))) { const n = parseInt(m[1].replace(/[ . ]/g, ''), 10); if (n >= 10 && n < 5000000) add(n, 2); }
   });
+  // Contrôle : un montant égal à HT + taxe est très probablement le total TTC
+  const ht = new Set(taxNums);
+  for (const a of taxNums) for (const b of taxNums) if (a > b) { const s = a + b; if (score.has(s)) add(s, 4); else if (!score.size || taxNums.length <= 4) add(s, 2.5); }
+  const sums = new Set(); taxNums.forEach(a => taxNums.forEach(b => { if (a > b) sums.add(a + b); }));
+  ht.forEach(n => { if (score.has(n) && !sums.has(n)) add(n, -3); }); // un montant du bloc HT/TGC n'est pas le total
   if (score.size) {
     res.amount = [...score.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0][0];
   } else {
