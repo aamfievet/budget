@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
@@ -164,7 +164,7 @@ function render() {
   v.innerHTML = ui.tab === 'week' ? viewWeek() : ui.tab === 'month' ? viewMonth() : viewSettings();
   loadThumbs();
 }
-function status(remain, avail) { if (remain < 0) return 'bad'; if (avail <= 0) return remain > 0 ? 'ok' : 'bad'; return remain / avail < 0.25 ? 'warn' : 'ok'; }
+function status(remain, avail) { if (remain < 0) return 'bad'; if (avail === 0 && remain === 0) return 'ok'; if (avail <= 0) return remain > 0 ? 'ok' : 'bad'; return remain / avail < 0.25 ? 'warn' : 'ok'; }
 const catOf = id => S.categories.find(c => c.id === id) || { name: 'Sans catégorie', icon: '❔' };
 const HUES = [145, 200, 30, 280, 340, 50, 175, 230];
 const catHue = id => HUES[Math.max(0, S.categories.findIndex(c => c.id === id)) % HUES.length];
@@ -190,12 +190,13 @@ function viewWeek() {
   const pct = st.avail > 0 ? Math.min(100, Math.max(0, st.spent / st.avail * 100)) : 100;
   const t = today(), isCur = t >= mon && t <= sun;
   let perday = '';
-  if (isCur) { const left = Math.round((parseD(sun) - parseD(t)) / 864e5) + 1; perday = st.remain > 0 ? `≈ ${fmt(st.remain / left)} par jour pendant ${left} jour${left > 1 ? 's' : ''}` : 'Budget de la semaine épuisé'; }
+  if (isCur) { const left = Math.round((parseD(sun) - parseD(t)) / 864e5) + 1; perday = st.avail === 0 && st.spent === 0 ? '' : st.remain > 0 ? `≈ ${fmt(st.remain / left)} par jour pendant ${left} jour${left > 1 ? 's' : ''}` : 'Budget de la semaine épuisé'; }
   const partsTxt = Object.keys(st.parts).length > 1 ? Object.entries(st.parts).map(([ym, v]) => `${fmt(v)} de ${fdate(ym + '-01', { month: 'long' })}`).join(' + ') : '';
   const leftRatio = st.avail > 0 ? Math.min(1, Math.max(0, st.remain / st.avail)) : 0;
   const C = 2 * Math.PI * 52;
   let mood;
-  if (t > sun) mood = st.remain >= 0 ? `Semaine réussie ! ${S.settings.carryOver ? fmt(st.remain) + ' reportés 🎉' : '🎉'}` : 'Semaine dépassée, on se rattrape 💪';
+  if (st.avail === 0 && st.spent === 0) mood = 'Prêt à démarrer 🚀';
+  else if (t > sun) mood = st.remain >= 0 ? `Semaine réussie ! ${S.settings.carryOver ? fmt(st.remain) + ' reportés 🎉' : '🎉'}` : 'Semaine dépassée, on se rattrape 💪';
   else if (t < mon) mood = 'Semaine à venir 🔮';
   else if (cls === 'bad') mood = 'Oups, budget dépassé 😬 On ralentit un peu.';
   else if (cls === 'warn') mood = 'Attention, on lève le pied 🐢';
@@ -295,6 +296,7 @@ function viewSettings() {
   h += `</div></div>`;
   h += `<div class="section"><h2>Options</h2><div class="list" style="padding:4px 14px">
     <label class="chk"><input type="checkbox" ${st.carryOver ? 'checked' : ''} onchange="A.setCarry(this.checked)"> Reporter le reste (ou le dépassement) sur la semaine suivante</label>
+    <label class="f"><span>Thème de l’affichage</span><select onchange="A.setTheme(this.value)">${[['auto','Automatique (comme le téléphone)'],['light','☀️ Clair'],['dark','🌙 Sombre']].map(([v,l])=>`<option value="${v}" ${(st.theme||'auto')===v?'selected':''}>${l}</option>`).join('')}</select></label>
     <label class="f"><span>Début du suivi (le budget est calculé à partir de cette date)</span><input type="date" value="${st.startDate}" onchange="A.setStart(this.value)"></label></div></div>`;
   h += `<div class="section"><h2>Sauvegarde Google Drive</h2><div class="list" style="padding:4px 14px 14px">
     <label class="f"><span>Identifiant client Google (voir le guide d’installation)</span><input id="cid" value="${esc(st.clientId)}" placeholder="xxxxxxxx.apps.googleusercontent.com" onchange="A.setClientId(this.value)"></label>
@@ -575,6 +577,7 @@ const A = {
       v => { if (!v.name) { toast('Nom requis'); return false; } put('categories', { ...c, ...v }); },
       id ? () => { const n = S.expenses.filter(e => e.categoryId === id).length; if (n) { alert(`Impossible : ${n} dépense(s) utilisent cette catégorie. Renomme-la plutôt.`); return; } remove('categories', id); } : null);
   },
+  setTheme(v) { S.settings.theme = v; saveSettings(); applyTheme(); },
   setCarry(v) { S.settings.carryOver = v; saveSettings(); },
   setStart(v) { if (!v) return; S.settings.startDate = v; saveSettings(); toast('Date de début mise à jour'); },
   setClientId(v) { S.settings.clientId = v.trim(); gToken = null; saveSettings(); toast('Identifiant enregistré'); },
@@ -618,6 +621,12 @@ const A = {
 };
 window.A = A; window.go = go; window.closeSheet = closeSheet;
 
+/* ---------- Thème ---------- */
+function applyTheme() {
+  const t = (S.settings && S.settings.theme) || 'auto';
+  if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.dataset.theme = t;
+}
+
 /* ---------- Démarrage ---------- */
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => go(b.dataset.tab));
 $('#fab').onclick = () => A.expense();
@@ -627,6 +636,7 @@ $('#fab').onclick = () => A.expense();
   if (!S.settings) defaults();
   else for (const s of LIST_STORES) S[s] = await dbAll(s);
   S.settings.months = S.settings.months || {};
+  applyTheme();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js');
   render();
