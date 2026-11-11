@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1a7f4b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Budget Hebdo">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<title>Budget Hebdo</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main id="view"></main>
+<button id="fab" aria-label="Ajouter une dépense">+</button>
+<nav id="tabs">
+  <button data-tab="week"><b>📅</b><span>Semaine</span></button>
+  <button data-tab="month"><b>🗓️</b><span>Mois</span></button>
+  <button data-tab="settings"><b>⚙️</b><span>Réglages</span></button>
+</nav>
+<div id="sheet" class="hidden"><div class="sheet-bg"></div><div class="sheet-body"></div></div>
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
