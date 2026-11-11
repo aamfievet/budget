@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '1.6.1';
+const APP_VERSION = '1.7.0';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
@@ -380,9 +380,10 @@ function parseNumbers(line) {
    les formats 10/11/2026, 10-11-26, 10.11.26, 2026-11-10 et « 10 nov. 2026 ».
    On garde de préférence une date suivie d'une heure, de moins de 2 mois (jamais dans le futur). */
 const MOIS = { jan: 1, fev: 2, fév: 2, mar: 3, avr: 4, mai: 5, juin: 6, juil: 7, aou: 8, aoû: 8, sep: 9, oct: 10, nov: 11, dec: 12, déc: 12 };
-function findDate(text) {
+function findDate(text, anchor) {
   const t = text.replace(/(?<=\d)[oO](?=\d|[\/.-])|(?<=[\/.-])[oO]/g, '0').replace(/(?<=\d|[\/.-])[lI|](?=\d)|(?<=\d)[lI|]/g, '1');
-  const max = today(), min = addDays(max, -62), cands = []; // ticket de moins de 2 mois
+  // anchor = jour de la prise de photo : le ticket date en général de ce jour-là ou de 1 à 2 jours avant
+  const max = anchor && anchor <= today() ? anchor : today(), min = addDays(max, -62), cands = [];
   const ok = (y, m, d) => {
     y = +y; m = +m; d = +d; if (y < 100) y += 2000;
     if (m < 1 || m > 12 || d < 1 || d > 31) return null;
@@ -402,7 +403,36 @@ function findDate(text) {
     cands.push([m.index, s]);
   }
   const good = cands.filter(c => c[1]).sort((a, b) => (b[2] ? 1 : 0) - (a[2] ? 1 : 0) || b[1].localeCompare(a[1]));
-  return good.length ? good[0][1] : null;
+  if (good.length) {
+    const near = good.filter(c => c[1] >= addDays(max, -10)); // de préférence une date proche de la photo
+    return (near.length ? near : good)[0][1];
+  }
+  return damagedDate(text, addDays(max, -10), max);
+}
+/* Date abîmée par la lecture (ex. « 10/1142026 », « 10/PV2026 », « to/fly2026 », « 10/1/2026 ») :
+   on lit le jour, on tente le mois lu, sinon on retient le mois en cours ou le précédent (ticket récent). */
+function damagedDate(text, min, max) {
+  const out = [];
+  for (const tok of text.split(/\s+/)) {
+    if (!/20\d{0,2}$/.test(tok) || tok.length < 6 || tok.length > 12) continue;
+    const t = tok.replace(/[oO]/g, '0').replace(/[tlIi|]/g, '1');
+    const clean = t.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/);
+    if (clean && `${clean[3]}-${pad(+clean[2])}-${pad(+clean[1])}` > max) continue; // date nette mais future : on n'invente rien
+    const dm = t.match(/^(\d{1,2})\D/) || t.match(/^(\d{2})/); if (!dm) continue;
+    const day = +dm[1]; if (day < 1 || day > 31) continue;
+    const ym = t.match(/(20\d{2}|202)$/); let year = ym[1].length === 4 ? +ym[1] : +max.slice(0, 4);
+    const mid = t.slice(dm[1].length, t.length - ym[1].length).replace(/\D/g, '');
+    const tries = [];
+    if (mid.length >= 2 && +mid.slice(0, 2) >= 1 && +mid.slice(0, 2) <= 12) tries.push(+mid.slice(0, 2));
+    else if (mid.length >= 1 && +mid[0] >= 1) tries.push(+mid[0]);
+    const cm = +max.slice(5, 7); tries.push(cm, cm === 1 ? 12 : cm - 1);
+    for (const m of tries) {
+      const y = (m === 12 && cm === 1) ? year - 1 : year;
+      const s = `${y}-${pad(m)}-${pad(day)}`; const d = parseD(s);
+      if (!isNaN(d) && d.getUTCDate() === day && s >= min && s <= max) { out.push(s); break; }
+    }
+  }
+  return out.length ? out.sort().pop() : null;
 }
 /* Enseignes connues (Nouvelle-Calédonie) : servent à reconnaître le magasin malgré les erreurs de lecture.
    Les mots-clés des catégories (Réglages) sont aussi utilisés. */
@@ -455,7 +485,7 @@ function findStore(lines) {
   });
   return best ? { name: best.slice(0, 30) } : null;
 }
-function parseReceipt(text) {
+function parseReceipt(text, anchor) {
   const lines = text.split(/\n/).map(l => l.trim().replace(/(?<=\d)[oO](?=[\dF\s]|$)/g, '0')).filter(Boolean); const res = {};
   // Montant : on note chaque nombre candidat (lignes TOTAL / À PAYER / CB, nombres suivis de F ou XPF)
   const prio = /(t?otal|net\s*[aà]\s*payer|[aà]\s*payer|montant|esp[eè]ces|carte|bancaire|cb\b|xpf)/i, excl = /(sous[\s-]*total|tgc|tva|taxe|hors\s*taxe|rendu|monnaie|[ée]conomi|remise|fid[ée]lit|points?|article)/i;
@@ -467,7 +497,7 @@ function parseReceipt(text) {
     const isTax = taxHead.test(l) && !/[aà]\s*payer/i.test(l);
     const header = isTax && parseNumbers(l).filter(n => n >= 10).length === 0; // ligne de titres de colonnes
     if (isTax) taxRows = header ? 2 : 0; else if (taxRows > 0) taxRows--;
-    if (isTax || (taxRows > 0 && !prio.test(l))) { taxNums.push(...parseNumbers(l).filter(n => n >= 10)); return; }
+    if (isTax || (taxRows > 0 && !prio.test(l))) { taxNums.push(...parseNumbers(l.replace(/\S*\d+[.,]\d{2}(?!\d)\S*/g, ' ')).filter(n => n >= 10)); return; } // taux (22.00) ignorés
     if (excl.test(l) || /t[ée]l|ridet/i.test(l)) return;
     const clean = l.replace(/\d{1,2}\s*[\/.-]\s*\d{1,2}\s*[\/.-]\s*\d{2,4}/g, ' ');
     const isPrio = prio.test(l), isTotal = totalWord.test(l);
@@ -477,7 +507,7 @@ function parseReceipt(text) {
   });
   // Contrôle : un montant égal à HT + taxe est très probablement le total TTC
   const ht = new Set(taxNums);
-  for (const a of taxNums) for (const b of taxNums) if (a > b) { const s = a + b; if (score.has(s)) add(s, 4); else if (!score.size || taxNums.length <= 4) add(s, 2.5); }
+  for (const a of taxNums) for (const b of taxNums) if (a > b) { const s = a + b; if (score.has(s)) add(s, 4); }
   const sums = new Set(); taxNums.forEach(a => taxNums.forEach(b => { if (a > b) sums.add(a + b); }));
   ht.forEach(n => { if (score.has(n) && !sums.has(n)) add(n, -3); }); // un montant du bloc HT/TGC n'est pas le total
   // Priorité à la ligne « TOTAL À PAYER » (ou NET À PAYER, TOTAL TTC, MONTANT DÛ) quand elle est lisible
@@ -487,13 +517,14 @@ function parseReceipt(text) {
     const nums = parseNumbers(l.replace(/\d+\s*articles?\S*/i, ' ')).filter(n => n >= 10);
     if (nums.length) add(Math.max(...nums), 6);
   });
+  if (!score.size) for (const a of taxNums) for (const b of taxNums) if (a > b) add(a + b, 1);
   if (score.size) {
     res.amount = [...score.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0][0];
   } else {
     const cand = []; lines.forEach(l => { if (!/\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}|t[ée]l|ridet/i.test(l)) cand.push(...parseNumbers(l)); });
     if (cand.length) res.amount = Math.max(...cand);
   }
-  const dt = findDate(text); if (dt) res.date = dt;
+  const dt = findDate(text, anchor); if (dt) res.date = dt;
   const st = findStore(lines); if (st) res.store = st.name;
   // Catégorie : d'abord d'après le magasin reconnu, puis d'après les mots-clés (lecture tolérante aux erreurs)
   const kw = c => (c.keywords || '').split(',').map(k => k.trim()).filter(Boolean);
@@ -564,14 +595,17 @@ async function handlePhoto(file) {
     o.textContent = `Photo optimisée : ${Math.round(file.size / 1024)} Ko → ${Math.round(blob.size / 1024)} Ko. Lecture du ticket…`;
     const kb = Math.round(blob.size / 1024);
     const text = await ocr(img, pc => { if ($('#ocr')) $('#ocr').textContent = `Photo : ${kb} Ko. Lecture du ticket… ${pc} %`; });
-    const r = parseReceipt(text); const f = $('#ef'); if (!f) return;
+    const lm = file.lastModified ? new Date(file.lastModified) : new Date();
+    const shot = lm.getFullYear() + '-' + pad(lm.getMonth() + 1) + '-' + pad(lm.getDate()); // jour de la photo
+    const r = parseReceipt(text, shot); const f = $('#ef'); if (!f) return;
     const found = [];
     if (r.amount) { f.amount.value = r.amount; found.push('montant ' + fmt(r.amount)); }
     if (r.date) { f.date.value = r.date; found.push('date ' + fshort(r.date)); }
     const noDate = !r.date;
+    if (noDate && shot <= today()) f.date.value = shot;
     if (r.store && !f.note.value) { f.note.value = r.store; found.push('« ' + r.store + ' »'); }
     if (r.categoryId) { draft.categoryId = r.categoryId; document.querySelectorAll('#chips .chip').forEach(c => c.classList.toggle('on', c.dataset.cat === r.categoryId)); found.push(catOf(r.categoryId).name); }
-    $('#ocr').innerHTML = (found.length ? `✅ Trouvé : ${esc(found.join(', '))}.${noDate ? '<br>📅 Date non trouvée sur le ticket : vérifie la date ci-dessous.' : ''}<br><b>Vérifie avant d’enregistrer.</b>` : '⚠️ Je n’ai pas réussi à lire le ticket. Saisis le montant à la main (la photo sera bien conservée).')
+    $('#ocr').innerHTML = (found.length ? `✅ Trouvé : ${esc(found.join(', '))}.${noDate ? '<br>📅 Date illisible sur le ticket : j’ai mis le jour de la photo (${fshort(f.date.value)}), corrige si besoin.' : ''}<br><b>Vérifie avant d’enregistrer.</b>` : '⚠️ Je n’ai pas réussi à lire le ticket. Saisis le montant à la main (la photo sera bien conservée).')
       + `<details style="margin-top:6px"><summary>Voir le texte lu</summary><pre style="white-space:pre-wrap;font-size:12px;margin:6px 0 0">${esc(text)}</pre></details>`;
   } catch (err) {
     console.error(err);
