@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '1.5.1';
+const APP_VERSION = '1.6.1';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
@@ -307,7 +307,7 @@ function viewSettings() {
   h += `<div class="section"><h2>Fichier de secours</h2><div class="list" style="padding:4px 14px 14px">
     <p class="help">Exporte toutes tes données (photos comprises) dans un fichier, sans passer par Google.</p>
     <div class="btns"><button class="btn ghost" onclick="A.exportFile()">Exporter</button><label class="btn ghost">Importer<input type="file" accept="application/json,.json" hidden onchange="A.importFile(this.files[0])"></label></div></div></div>`;
-  h += `<div class="section">${deferredInstall ? `<button class="btn block" onclick="A.install()">📲 Installer l’application</button>` : ''}<p class="help" style="text-align:center">Budget Hebdo v${APP_VERSION} · ${S.expenses.length} dépenses enregistrées</p></div>`;
+  h += `<div class="section">${deferredInstall ? `<button class="btn block" onclick="A.install()">📲 Installer l’application</button>` : ''}<button class="btn ghost block" onclick="A.checkUpdate()">🔄 Vérifier les mises à jour</button><p class="help" style="text-align:center">Budget Hebdo v${APP_VERSION} · ${S.expenses.length} dépenses enregistrées</p></div>`;
   return h;
 }
 
@@ -378,11 +378,11 @@ function parseNumbers(line) {
 }
 /* Recherche de la date d'achat : tolère les erreurs de lecture (O/0, l/1, espaces),
    les formats 10/11/2026, 10-11-26, 10.11.26, 2026-11-10 et « 10 nov. 2026 ».
-   On garde la première date valide des 12 derniers mois (jamais dans le futur). */
+   On garde de préférence une date suivie d'une heure, de moins de 2 mois (jamais dans le futur). */
 const MOIS = { jan: 1, fev: 2, fév: 2, mar: 3, avr: 4, mai: 5, juin: 6, juil: 7, aou: 8, aoû: 8, sep: 9, oct: 10, nov: 11, dec: 12, déc: 12 };
 function findDate(text) {
   const t = text.replace(/(?<=\d)[oO](?=\d|[\/.-])|(?<=[\/.-])[oO]/g, '0').replace(/(?<=\d|[\/.-])[lI|](?=\d)|(?<=\d)[lI|]/g, '1');
-  const max = today(), min = addDays(max, -365), cands = [];
+  const max = today(), min = addDays(max, -62), cands = []; // ticket de moins de 2 mois
   const ok = (y, m, d) => {
     y = +y; m = +m; d = +d; if (y < 100) y += 2000;
     if (m < 1 || m > 12 || d < 1 || d > 31) return null;
@@ -391,7 +391,7 @@ function findDate(text) {
     return s >= min && s <= max ? s : null;
   };
   let m; const re1 = /(\d{1,2})\s*[\/.-]\s*(\d{1,2})\s*[\/.-]\s*(\d{4}|\d{2})(?!\d)/g;
-  while ((m = re1.exec(t))) cands.push([m.index, ok(m[3], m[2], m[1])]);
+  while ((m = re1.exec(t))) cands.push([m.index, ok(m[3], m[2], m[1]), /^\s*\d{1,2}\s*[:hH]\s*\d{2}/.test(t.slice(m.index + m[0].length, m.index + m[0].length + 12))]);
   const re2 = /(20\d{2})-(\d{2})-(\d{2})/g;
   while ((m = re2.exec(t))) cands.push([m.index, ok(m[1], m[2], m[3])]);
   const re3 = /(\d{1,2})\s*(jan\w*|f[ée]v\w*|mar\w*|avr\w*|mai|juin|juil\w*|ao[uû]\w*|sep\w*|oct\w*|nov\w*|d[ée]c\w*)\.?\s*(\d{4}|\d{2})?/gi;
@@ -401,7 +401,7 @@ function findDate(text) {
     if (!s && !m[3]) s = ok(+y - 1, mo, m[1]);
     cands.push([m.index, s]);
   }
-  const good = cands.filter(c => c[1]).sort((a, b) => a[0] - b[0]);
+  const good = cands.filter(c => c[1]).sort((a, b) => (b[2] ? 1 : 0) - (a[2] ? 1 : 0) || b[1].localeCompare(a[1]));
   return good.length ? good[0][1] : null;
 }
 /* Enseignes connues (Nouvelle-Calédonie) : servent à reconnaître le magasin malgré les erreurs de lecture.
@@ -422,14 +422,14 @@ function fuzzyMatch(line, k) {
   for (let len = K.length - 1; len <= K.length + 1; len++)
     for (let i = 0; i + len <= L.length; i++) {
       const d = lev(L.substr(i, len), K) + (len !== K.length ? 0.5 : 0);
-      if (d <= tol && (!best || d < best.d || (d === best.d && i < best.start))) best = { start: i, end: i + len, d };
+      if (Math.floor(d) <= tol && (!best || d < best.d || (d === best.d && i < best.start))) best = { start: i, end: i + len, d };
     }
   return best;
 }
 const fuzzyIn = (line, k) => fuzzyMatch(line, k) ? 1 : -1;
-const HEADER_JUNK = /(t[ée]l\b|t[ée]l\s*:|ridet|rc\s|siret|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|\d+h\d*|horaire|bienvenue|merci|www|\S@\S|\brue\b|route|bp\s?\d|bp\b|nou[mn][ée]a)/i;
+const HEADER_JUNK = /(description|\bqt[ée]\b|montant|nontant|\btaux\b|article|divers|payer|totaux|\bprix\b|quantit|t[ée]l\b|t[ée]l\s*:|ridet|rc\s|siret|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|\d+h\d*|horaire|bienvenue|merci|www|\S@\S|\brue\b|route|bp\s?\d|bp\b|nou[mn][ée]a)/i;
 function findStore(lines) {
-  const head = lines.slice(0, 8);
+  const head = lines.slice(0, 10).concat(lines.length > 10 ? lines.slice(-6) : []);
   const names = SHOPS.concat(S.categories.flatMap(c => (c.keywords || '').split(',').map(k => k.trim()).filter(k => k.length >= 4 && k.toLowerCase() !== 'total')));
   // 1) une enseigne connue dans l'en-tête : on garde l'enseigne bien écrite + la suite de la ligne (ex. « Champion Robinson »)
   for (const l of head) {
@@ -447,6 +447,7 @@ function findStore(lines) {
   // 2) sinon la ligne d'en-tête la plus « propre » (mots de 3 lettres ou plus), en retirant les débris de logo
   let best = null, bestScore = 0;
   head.forEach((l, i) => {
+    if (i >= 10) return;
     if (HEADER_JUNK.test(l) || /\d{3,}/.test(l)) return;
     const words = l.split(/\s+/).filter(w => /^[\p{L}'&-]{3,}$/u.test(w));
     const score = words.reduce((s, w) => s + w.length, 0) - i; // un peu de bonus aux premières lignes
@@ -479,6 +480,13 @@ function parseReceipt(text) {
   for (const a of taxNums) for (const b of taxNums) if (a > b) { const s = a + b; if (score.has(s)) add(s, 4); else if (!score.size || taxNums.length <= 4) add(s, 2.5); }
   const sums = new Set(); taxNums.forEach(a => taxNums.forEach(b => { if (a > b) sums.add(a + b); }));
   ht.forEach(n => { if (score.has(n) && !sums.has(n)) add(n, -3); }); // un montant du bloc HT/TGC n'est pas le total
+  // Priorité à la ligne « TOTAL À PAYER » (ou NET À PAYER, TOTAL TTC, MONTANT DÛ) quand elle est lisible
+  const payLine = /([aà]\s*pa[yv][eé]|total\s*t\.?t\.?c|montant\s*d[uû]|net\s*[aà])/i;
+  lines.forEach(l => {
+    if (!payLine.test(l)) return;
+    const nums = parseNumbers(l.replace(/\d+\s*articles?\S*/i, ' ')).filter(n => n >= 10);
+    if (nums.length) add(Math.max(...nums), 6);
+  });
   if (score.size) {
     res.amount = [...score.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0][0];
   } else {
@@ -724,6 +732,16 @@ const A = {
     try { const data = JSON.parse(await file.text()); await importData(data, async p => p.data ? await (await fetch(p.data)).blob() : null); toast('✅ Import terminé'); render(); }
     catch (e) { alert('Import impossible : ' + e.message); }
   },
+  async checkUpdate() {
+    toast('Recherche d’une mise à jour…');
+    try {
+      const r = await navigator.serviceWorker.getRegistration(); if (r) await r.update();
+      const res = await fetch('app.js', { cache: 'no-store' }); const txt = await res.text();
+      const v = (txt.match(/APP_VERSION = '([\d.]+)'/) || [])[1];
+      if (v && v !== APP_VERSION) { toast('Nouvelle version ' + v + ', redémarrage…'); setTimeout(() => location.reload(), 1200); }
+      else toast('Tu as déjà la dernière version (v' + APP_VERSION + ')');
+    } catch { toast('Pas de connexion internet'); }
+  },
   async install() { if (!deferredInstall) return; deferredInstall.prompt(); await deferredInstall.userChoice; deferredInstall = null; render(); }
 };
 window.A = A; window.go = go; window.closeSheet = closeSheet;
@@ -745,6 +763,11 @@ $('#fab').onclick = () => A.expense();
   S.settings.months = S.settings.months || {};
   applyTheme();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js');
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    const hadController = !!navigator.serviceWorker.controller; let reloaded = false;
+    // Quand une nouvelle version s'installe, on recharge une fois pour l'afficher
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloaded) { reloaded = true; location.reload(); } });
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r.update()).catch(() => {});
+  }
   render();
 })();
