@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
@@ -375,6 +375,34 @@ function parseNumbers(line) {
   }
   return out;
 }
+/* Recherche de la date d'achat : tolère les erreurs de lecture (O/0, l/1, espaces),
+   les formats 10/11/2026, 10-11-26, 10.11.26, 2026-11-10 et « 10 nov. 2026 ».
+   On garde la première date valide des 12 derniers mois (jamais dans le futur). */
+const MOIS = { jan: 1, fev: 2, fév: 2, mar: 3, avr: 4, mai: 5, juin: 6, juil: 7, aou: 8, aoû: 8, sep: 9, oct: 10, nov: 11, dec: 12, déc: 12 };
+function findDate(text) {
+  const t = text.replace(/(?<=\d)[oO](?=\d|[\/.-])|(?<=[\/.-])[oO]/g, '0').replace(/(?<=\d|[\/.-])[lI|](?=\d)|(?<=\d)[lI|]/g, '1');
+  const max = today(), min = addDays(max, -365), cands = [];
+  const ok = (y, m, d) => {
+    y = +y; m = +m; d = +d; if (y < 100) y += 2000;
+    if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+    const s = `${y}-${pad(m)}-${pad(d)}`; const dt = parseD(s);
+    if (isNaN(dt) || dt.getUTCDate() !== d) return null;
+    return s >= min && s <= max ? s : null;
+  };
+  let m; const re1 = /(\d{1,2})\s*[\/.-]\s*(\d{1,2})\s*[\/.-]\s*(\d{4}|\d{2})(?!\d)/g;
+  while ((m = re1.exec(t))) cands.push([m.index, ok(m[3], m[2], m[1])]);
+  const re2 = /(20\d{2})-(\d{2})-(\d{2})/g;
+  while ((m = re2.exec(t))) cands.push([m.index, ok(m[1], m[2], m[3])]);
+  const re3 = /(\d{1,2})\s*(jan\w*|f[ée]v\w*|mar\w*|avr\w*|mai|juin|juil\w*|ao[uû]\w*|sep\w*|oct\w*|nov\w*|d[ée]c\w*)\.?\s*(\d{4}|\d{2})?/gi;
+  while ((m = re3.exec(t))) {
+    const k = m[2].toLowerCase(); const mo = MOIS[k.slice(0, 4)] || MOIS[k.slice(0, 3)];
+    let y = m[3] || max.slice(0, 4); let s = ok(y, mo, m[1]);
+    if (!s && !m[3]) s = ok(+y - 1, mo, m[1]);
+    cands.push([m.index, s]);
+  }
+  const good = cands.filter(c => c[1]).sort((a, b) => a[0] - b[0]);
+  return good.length ? good[0][1] : null;
+}
 function parseReceipt(text) {
   const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean); const res = {};
   const prio = /(total|net\s*[aà]\s*payer|[aà]\s*payer|montant|esp[eè]ces|carte|cb\b|xpf)/i, excl = /(sous[\s-]*total|tgc|tva|taxe|rendu|monnaie|[ée]conomi|remise|fid[ée]lit|points?)/i;
@@ -382,8 +410,7 @@ function parseReceipt(text) {
   lines.forEach(l => { if (prio.test(l) && !excl.test(l)) cand.push(...parseNumbers(l.replace(/\d{2}[\/.-]\d{2}[\/.-]\d{2,4}/g, ''))); });
   if (!cand.length) lines.forEach(l => { if (!/\d{2}[\/.-]\d{2}[\/.-]\d{2,4}|t[ée]l|ridet|\d{2}[ .]\d{2}[ .]\d{2}$/i.test(l)) cand.push(...parseNumbers(l)); });
   if (cand.length) res.amount = Math.max(...cand);
-  const dm = text.match(/(\d{2})[\/.-](\d{2})[\/.-](\d{4}|\d{2})/);
-  if (dm) { let y = dm[3].length === 2 ? '20' + dm[3] : dm[3]; const s = `${y}-${dm[2]}-${dm[1]}`; if (!isNaN(parseD(s)) && +dm[2] >= 1 && +dm[2] <= 12 && +dm[1] <= 31 && s <= today()) res.date = s; }
+  const dt = findDate(text); if (dt) res.date = dt;
   const store = lines.find(l => /[a-zA-Zéè]{3,}/.test(l) && l.length <= 40);
   if (store) res.store = store.replace(/[^\p{L}\p{N} '&-]/gu, '').trim().slice(0, 30);
   const low = text.toLowerCase();
@@ -456,9 +483,11 @@ async function handlePhoto(file) {
     const found = [];
     if (r.amount) { f.amount.value = r.amount; found.push('montant ' + fmt(r.amount)); }
     if (r.date) { f.date.value = r.date; found.push('date ' + fshort(r.date)); }
+    const noDate = !r.date;
     if (r.store && !f.note.value) { f.note.value = r.store; found.push('« ' + r.store + ' »'); }
     if (r.categoryId) { draft.categoryId = r.categoryId; document.querySelectorAll('#chips .chip').forEach(c => c.classList.toggle('on', c.dataset.cat === r.categoryId)); found.push(catOf(r.categoryId).name); }
-    $('#ocr').innerHTML = found.length ? `✅ Trouvé : ${esc(found.join(', '))}.<br><b>Vérifie le montant avant d’enregistrer.</b>` : '⚠️ Je n’ai pas réussi à lire le ticket. Saisis le montant à la main (la photo sera bien conservée).';
+    $('#ocr').innerHTML = (found.length ? `✅ Trouvé : ${esc(found.join(', '))}.${noDate ? '<br>📅 Date non trouvée sur le ticket : vérifie la date ci-dessous.' : ''}<br><b>Vérifie avant d’enregistrer.</b>` : '⚠️ Je n’ai pas réussi à lire le ticket. Saisis le montant à la main (la photo sera bien conservée).')
+      + `<details style="margin-top:6px"><summary>Voir le texte lu</summary><pre style="white-space:pre-wrap;font-size:12px;margin:6px 0 0">${esc(text)}</pre></details>`;
   } catch (err) {
     console.error(err);
     if ($('#ocr')) $('#ocr').textContent = draft.newBlob ? '⚠️ Lecture automatique indisponible (connexion internet nécessaire). Saisis le montant à la main, la photo est conservée.' : '⚠️ Impossible de lire cette image.';
