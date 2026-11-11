@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
@@ -166,6 +166,8 @@ function render() {
 }
 function status(remain, avail) { if (remain < 0) return 'bad'; if (avail <= 0) return remain > 0 ? 'ok' : 'bad'; return remain / avail < 0.25 ? 'warn' : 'ok'; }
 const catOf = id => S.categories.find(c => c.id === id) || { name: 'Sans catégorie', icon: '❔' };
+const HUES = [145, 200, 30, 280, 340, 50, 175, 230];
+const catHue = id => HUES[Math.max(0, S.categories.findIndex(c => c.id === id)) % HUES.length];
 
 function banners() {
   let h = '';
@@ -190,26 +192,35 @@ function viewWeek() {
   let perday = '';
   if (isCur) { const left = Math.round((parseD(sun) - parseD(t)) / 864e5) + 1; perday = st.remain > 0 ? `≈ ${fmt(st.remain / left)} par jour pendant ${left} jour${left > 1 ? 's' : ''}` : 'Budget de la semaine épuisé'; }
   const partsTxt = Object.keys(st.parts).length > 1 ? Object.entries(st.parts).map(([ym, v]) => `${fmt(v)} de ${fdate(ym + '-01', { month: 'long' })}`).join(' + ') : '';
-  let h = `<header class="wk-head ${cls}">
-    <div class="wk-nav"><button onclick="A.week(-1)" aria-label="Semaine précédente">‹</button>
-      <div><div class="wk-num">Semaine ${w}</div><div class="wk-dates">du ${fshort(mon)} au ${fshort(sun)}</div></div>
-      <button onclick="A.week(1)" aria-label="Semaine suivante">›</button></div>
-    <div class="remain-label">Reste à dépenser</div>
-    <div class="remain">${fmt(st.remain)}</div>
+  const leftRatio = st.avail > 0 ? Math.min(1, Math.max(0, st.remain / st.avail)) : 0;
+  const C = 2 * Math.PI * 52;
+  let mood;
+  if (t > sun) mood = st.remain >= 0 ? `Semaine réussie ! ${S.settings.carryOver ? fmt(st.remain) + ' reportés 🎉' : '🎉'}` : 'Semaine dépassée, on se rattrape 💪';
+  else if (t < mon) mood = 'Semaine à venir 🔮';
+  else if (cls === 'bad') mood = 'Oups, budget dépassé 😬 On ralentit un peu.';
+  else if (cls === 'warn') mood = 'Attention, on lève le pied 🐢';
+  else mood = leftRatio > 0.6 ? 'Tout roule, continue comme ça 👌' : 'Sur la bonne voie 🙂';
+  let h = `<header class="hero ${cls}">
+    <div class="hero-top"><button class="round" onclick="A.week(-1)" aria-label="Semaine précédente">‹</button>
+      <div class="wk-pill">Semaine ${w}</div>
+      <button class="round" onclick="A.week(1)" aria-label="Semaine suivante">›</button></div>
+    <div class="hero-dates">du ${fshort(mon)} au ${fshort(sun)}</div>
+    <div class="ring"><svg viewBox="0 0 120 120"><circle class="track" cx="60" cy="60" r="52"/><circle class="prog" cx="60" cy="60" r="52" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${(C * (1 - leftRatio)).toFixed(1)}"/></svg>
+      <div class="ring-txt"><small>Il me reste</small><b class="remain">${fmt(st.remain)}</b><small>sur ${fmt(st.avail)}</small></div></div>
+    <div class="mood">${mood}</div>
     ${perday ? `<div class="perday">${perday}</div>` : ''}
-    <div class="bar"><i style="width:${pct}%"></i></div>
-    ${!isCur ? `<button class="today-btn" onclick="A.thisWeek()">Revenir à cette semaine</button>` : ''}
+    ${!isCur ? `<button class="today-btn" onclick="A.thisWeek()">↩ Revenir à cette semaine</button>` : ''}
   </header>
   ${isCur ? banners() : ''}
   <div class="stats">
-    <div class="stat"><small>Budget semaine</small><b>${fmt(st.budget)}</b></div>
-    <div class="stat"><small>Report</small><b class="${st.carry < 0 ? 'neg' : ''}">${st.carry > 0 ? '+' : ''}${fmt(st.carry)}</b></div>
-    <div class="stat"><small>Dépensé</small><b>${fmt(st.spent)}</b></div>
+    <div class="stat s1"><span>🎯</span><small>Budget</small><b>${fmt(st.budget)}</b></div>
+    <div class="stat s2"><span>🔁</span><small>Report</small><b>${st.carry > 0 ? '+' : ''}${fmt(st.carry)}</b></div>
+    <div class="stat s3"><span>🧾</span><small>Dépensé</small><b>${fmt(st.spent)}</b></div>
   </div>
-  ${partsTxt ? `<p class="help" style="padding:0 16px">Semaine à cheval : ${partsTxt}</p>` : ''}
-  <div class="section"><h2>Dépenses <button onclick="A.expense()">+ Ajouter</button></h2>`;
+  ${partsTxt ? `<p class="help" style="padding:0 20px">Semaine à cheval sur deux mois : ${partsTxt}</p>` : ''}
+  <div class="section"><h2>Mes dépenses <button onclick="A.expense()">+ Ajouter</button></h2>`;
   const exps = S.expenses.filter(e => e.date >= mon && e.date <= sun).sort((a, b) => b.date.localeCompare(a.date) || (b.created || 0) - (a.created || 0));
-  if (!exps.length) h += `<div class="list"><div class="empty">Aucune dépense cette semaine.<br>Touche <b>+</b> pour en ajouter une.</div></div>`;
+  if (!exps.length) h += `<div class="list"><div class="empty"><div class="empty-ico">🌱</div>Aucune dépense cette semaine.<br>Touche le bouton <b>+</b> pour en ajouter une.</div></div>`;
   let day = null;
   exps.forEach(e => {
     if (e.date !== day) {
@@ -225,7 +236,7 @@ function viewWeek() {
 function expRow(e) {
   const c = catOf(e.categoryId);
   return `<div class="row" onclick="A.expense('${e.id}')">
-    ${e.photoId ? `<img class="thumb" data-photo="${e.photoId}" alt="">` : `<span class="ico">${c.icon || '•'}</span>`}
+    ${e.photoId ? `<img class="thumb" data-photo="${e.photoId}" alt="">` : `<span class="bubble" style="--h:${catHue(e.categoryId)}">${c.icon || '•'}</span>`}
     <div class="mid"><div>${esc(e.note || c.name)}</div><small>${esc(c.name)}${e.photoId ? ' · 📷' : ''}</small></div>
     <div class="amt">${fmt(e.amount)}</div></div>`;
 }
@@ -243,10 +254,10 @@ function viewMonth() {
   if (before) return h + `<div class="empty">Ce mois est avant la date de début de suivi (${fshort(S.settings.startDate)}).<br>Tu peux la modifier dans Réglages.</div>`;
   h += `<div class="section"><h2>Revenus <button onclick="A.addIncome('${ym}')">+ Ajouter</button></h2><div class="list">`;
   inc.sort((a, b) => a.date.localeCompare(b.date)).forEach(i => h += `<div class="row" onclick="A.editItem('${i.id}')"><span class="ico">💶</span><div class="mid"><div>${esc(i.name)}</div><small>${i.date.slice(0, 7) === ym ? 'compté à partir du ' + fshort(i.date) : 'compté sur tout le mois'}</small></div><div class="amt pos">+${fmt(i.amount)}</div></div>`);
-  pend.forEach(t => h += `<div class="row" onclick="A.addIncome('${ym}','${t.id}')"><span class="ico">⏳</span><div class="mid"><div>${esc(t.name)}</div><small class="pending">En attente — touche pour saisir le montant reçu</small></div><div class="amt">—</div></div>`);
+  pend.forEach(t => h += `<div class="row" onclick="A.addIncome('${ym}','${t.id}')"><span class="ico" style="--h:40">⏳</span><div class="mid"><div>${esc(t.name)}</div><small class="pending">En attente — touche pour saisir le montant reçu</small></div><div class="amt">—</div></div>`);
   if (!inc.length && !pend.length) h += `<div class="empty">Aucun revenu. Ajoute tes types de revenus dans Réglages.</div>`;
   h += `</div></div><div class="section"><h2>Charges fixes <button onclick="A.addCharge('${ym}')">+ Ajouter</button></h2><div class="list">`;
-  ch.sort((a, b) => b.amount - a.amount).forEach(i => h += `<div class="row" onclick="A.editItem('${i.id}')"><span class="ico">📄</span><div class="mid"><div>${esc(i.name)}</div></div><div class="amt neg">−${fmt(i.amount)}</div></div>`);
+  ch.sort((a, b) => b.amount - a.amount).forEach(i => h += `<div class="row" onclick="A.editItem('${i.id}')"><span class="ico" style="--h:20">📄</span><div class="mid"><div>${esc(i.name)}</div></div><div class="amt neg">−${fmt(i.amount)}</div></div>`);
   if (!ch.length) h += `<div class="empty">Aucune charge fixe ce mois-ci.</div>`;
   h += `</div></div>`;
   // Répartition par semaine
@@ -263,7 +274,7 @@ function viewMonth() {
   const exps = S.expenses.filter(e => e.date >= first && e.date <= last); const tExp = exps.reduce((s, e) => s + e.amount, 0);
   const byCat = {}; exps.forEach(e => byCat[e.categoryId] = (byCat[e.categoryId] || 0) + e.amount);
   h += `<div class="section"><h2>Dépenses du mois</h2><div class="list">`;
-  Object.entries(byCat).sort((a, b) => b[1] - a[1]).forEach(([id, v]) => { const c = catOf(id); h += `<div class="row"><span class="ico">${c.icon}</span><div class="mid"><div>${esc(c.name)}</div><small>${Math.round(v / tExp * 100)} %</small></div><div class="amt">${fmt(v)}</div></div>`; });
+  Object.entries(byCat).sort((a, b) => b[1] - a[1]).forEach(([id, v]) => { const c = catOf(id); h += `<div class="row"><span class="ico" style="--h:${catHue(c.id)}">${c.icon}</span><div class="mid"><div>${esc(c.name)}</div><small>${Math.round(v / tExp * 100)} %</small></div><div class="amt">${fmt(v)}</div></div>`; });
   h += `<div class="row total-row"><span class="ico">Σ</span><div class="mid"><div>Total dépensé</div></div><div class="amt">${fmt(tExp)}</div></div>
     <div class="row total-row"><span class="ico">=</span><div class="mid"><div>Reste sur le mois</div></div><div class="amt ${tInc - tCh - tExp < 0 ? 'neg' : 'pos'}">${fmt(tInc - tCh - tExp)}</div></div></div></div>`;
   return h;
@@ -275,12 +286,12 @@ function viewSettings() {
   h += `<div class="section"><h2>Types de revenus <button onclick="A.incomeType()">+ Ajouter</button></h2><div class="list">`;
   S.incomeTypes.forEach(t => h += `<div class="row" onclick="A.incomeType('${t.id}')"><span class="ico">💶</span><div class="mid"><div>${esc(t.name)}${t.active ? '' : ' (inactif)'}</div><small>${t.variable ? 'Montant variable, saisi chaque mois' : 'Fixe, chaque mois'}</small></div><div class="amt">${t.variable ? '—' : fmt(t.amount)}</div></div>`);
   h += `</div></div><div class="section"><h2>Charges fixes <button onclick="A.chargeType()">+ Ajouter</button></h2><div class="list">`;
-  S.chargeTypes.forEach(t => h += `<div class="row" onclick="A.chargeType('${t.id}')"><span class="ico">📄</span><div class="mid"><div>${esc(t.name)}${t.active ? '' : ' (inactif)'}</div></div><div class="amt">${fmt(t.amount)}</div></div>`);
+  S.chargeTypes.forEach(t => h += `<div class="row" onclick="A.chargeType('${t.id}')"><span class="ico" style="--h:20">📄</span><div class="mid"><div>${esc(t.name)}${t.active ? '' : ' (inactif)'}</div></div><div class="amt">${fmt(t.amount)}</div></div>`);
   const tI = S.incomeTypes.filter(t => t.active && !t.variable).reduce((s, t) => s + t.amount, 0), tC = S.chargeTypes.filter(t => t.active).reduce((s, t) => s + t.amount, 0);
   h += `<div class="row total-row"><span class="ico">=</span><div class="mid"><div>Solde mensuel de base</div><small>revenus fixes − charges (hors revenus variables)</small></div><div class="amt ${tI - tC < 0 ? 'neg' : 'pos'}">${fmt(tI - tC)}</div></div>`;
   h += `</div><p class="help">Une modification s’applique au mois en cours et aux suivants. Pour un changement ponctuel, modifie la ligne dans l’onglet Mois.</p></div>`;
   h += `<div class="section"><h2>Catégories de dépenses <button onclick="A.category()">+ Ajouter</button></h2><div class="list">`;
-  S.categories.forEach(c => h += `<div class="row" onclick="A.category('${c.id}')"><span class="ico">${c.icon}</span><div class="mid"><div>${esc(c.name)}</div><small>${esc(c.keywords || 'aucun mot-clé')}</small></div></div>`);
+  S.categories.forEach(c => h += `<div class="row" onclick="A.category('${c.id}')"><span class="ico" style="--h:${catHue(c.id)}">${c.icon}</span><div class="mid"><div>${esc(c.name)}</div><small>${esc(c.keywords || 'aucun mot-clé')}</small></div></div>`);
   h += `</div></div>`;
   h += `<div class="section"><h2>Options</h2><div class="list" style="padding:4px 14px">
     <label class="chk"><input type="checkbox" ${st.carryOver ? 'checked' : ''} onchange="A.setCarry(this.checked)"> Reporter le reste (ou le dépassement) sur la semaine suivante</label>
