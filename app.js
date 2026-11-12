@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '2.1.1';
+const APP_VERSION = '2.2.0';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 // Moteur de lecture (Tesseract.js 5.1.1, licence Apache 2.0) hébergé avec l'app, dans le dossier tesseract/
@@ -87,16 +87,27 @@ function defaults() {
 /* ---------- Calcul du budget ---------- */
 let cache = { daily: new Map(), spentByDay: null };
 function invalidate() { cache = { daily: new Map(), spentByDay: null }; }
-const curYm = () => today().slice(0, 7);
-const startYm = () => S.settings.startDate.slice(0, 7);
+/* ---------- Mois budgétaire ----------
+   Avec un jour de début J (ex. 25), le mois budgétaire « novembre » va du 25 octobre au 24 novembre.
+   J = 1 : mois civil classique. */
+const cycleDay = () => Math.min(28, Math.max(1, +((S.settings && S.settings.cycleDay) || 1)));
+const cycleStart = ym => cycleDay() === 1 ? ym + '-01' : addMonths(ym, -1) + '-' + pad(cycleDay());
+const cycleEnd = ym => addDays(cycleStart(addMonths(ym, 1)), -1);
+const cycleLen = ym => Math.round((parseD(cycleEnd(ym)) - parseD(cycleStart(ym))) / 864e5) + 1;
+const cycleOf = s => cycleDay() === 1 ? s.slice(0, 7) : (parseD(s).getUTCDate() >= cycleDay() ? addMonths(s.slice(0, 7), 1) : s.slice(0, 7));
+const dayIdx = (s, ym) => Math.round((parseD(s) - parseD(cycleStart(ym))) / 864e5);
+const inCycle = (s, ym) => !!s && s >= cycleStart(ym) && s <= cycleEnd(ym);
+const cycleLabel = ym => cycleDay() === 1 ? '' : `du ${fshort(cycleStart(ym))} au ${fshort(cycleEnd(ym))}`;
+const curYm = () => cycleOf(today());
+const startYm = () => cycleOf(S.settings.startDate);
 
 /* Crée les lignes du mois (revenus fixes + charges) à partir des types, une seule fois par mois */
 function ensureMonth(ym) {
   if (ym < startYm()) return false;
   if (S.settings.months[ym]) return true;
   S.settings.months[ym] = true;
-  S.incomeTypes.filter(t => t.active && !t.variable && t.amount > 0).forEach(t => put('monthItems', { id: uid(), month: ym, kind: 'income', typeId: t.id, name: t.name, amount: t.amount, date: ym + '-01', auto: true }));
-  S.chargeTypes.filter(t => t.active && t.amount > 0).forEach(t => put('monthItems', { id: uid(), month: ym, kind: 'charge', typeId: t.id, name: t.name, amount: t.amount, date: ym + '-01', auto: true }));
+  S.incomeTypes.filter(t => t.active && !t.variable && t.amount > 0).forEach(t => put('monthItems', { id: uid(), month: ym, kind: 'income', typeId: t.id, name: t.name, amount: t.amount, date: cycleStart(ym), auto: true }));
+  S.chargeTypes.filter(t => t.active && t.amount > 0).forEach(t => put('monthItems', { id: uid(), month: ym, kind: 'charge', typeId: t.id, name: t.name, amount: t.amount, date: cycleStart(ym), auto: true }));
   saveSettings();
   return true;
 }
@@ -109,7 +120,7 @@ function syncType(kind, t, deleted) {
     const wanted = !deleted && t.active && !(kind === 'income' && t.variable) && t.amount > 0;
     if (wanted) {
       if (autoIt) put('monthItems', { ...autoIt, amount: t.amount, name: t.name });
-      else if (!items.length) put('monthItems', { id: uid(), month: ym, kind, typeId: t.id, name: t.name, amount: t.amount, date: ym + '-01', auto: true });
+      else if (!items.length) put('monthItems', { id: uid(), month: ym, kind, typeId: t.id, name: t.name, amount: t.amount, date: cycleStart(ym), auto: true });
     } else if (autoIt) remove('monthItems', autoIt.id);
     items.filter(i => !i.auto && !deleted).forEach(i => { if (i.name !== t.name) put('monthItems', { ...i, name: t.name }); });
   });
@@ -123,11 +134,11 @@ function spread(arr, amount, from) {
 /* Budget par jour d'un mois : charges réparties sur tout le mois, chaque revenu à partir de sa date de réception */
 function monthDaily(ym) {
   if (cache.daily.has(ym)) return cache.daily.get(ym);
-  const arr = new Array(daysInMonth(ym)).fill(0);
+  const arr = new Array(cycleLen(ym)).fill(0);
   if (ensureMonth(ym)) {
     const byStart = {}; // montants nets regroupés par jour de départ (évite les écarts d'arrondi)
     S.monthItems.filter(i => i.month === ym).forEach(i => {
-      const from = i.kind === 'charge' ? 0 : (i.date && i.date.slice(0, 7) === ym) ? parseD(i.date).getUTCDate() - 1 : 0;
+      const from = i.kind === 'charge' || i.auto || (i.date === ym + '-01' && !(S.incomeTypes.find(t => t.id === i.typeId) || {}).variable) ? 0 : inCycle(i.date, ym) ? dayIdx(i.date, ym) : (i.date > cycleEnd(ym) ? cycleLen(ym) - 1 : 0);
       byStart[from] = (byStart[from] || 0) + (i.kind === 'charge' ? -i.amount : i.amount);
     });
     estimatesFor(ym).forEach(t => { byStart[0] = (byStart[0] || 0) + t.amount; }); // revenus variables comptés en estimation
@@ -136,14 +147,14 @@ function monthDaily(ym) {
   cache.daily.set(ym, arr);
   return arr;
 }
-const dayBudget = s => s < S.settings.startDate ? 0 : monthDaily(s.slice(0, 7))[parseD(s).getUTCDate() - 1];
+const dayBudget = s => { if (s < S.settings.startDate) return 0; const ym = cycleOf(s); return monthDaily(ym)[dayIdx(s, ym)]; };
 function spentOn(s) {
   if (!cache.spentByDay) { cache.spentByDay = new Map(); S.expenses.forEach(e => cache.spentByDay.set(e.date, (cache.spentByDay.get(e.date) || 0) + e.amount)); }
   return cache.spentByDay.get(s) || 0;
 }
 function weekRaw(mon) {
   let budget = 0, spent = 0; const parts = {};
-  for (let i = 0; i < 7; i++) { const d = addDays(mon, i); const b = dayBudget(d); budget += b; spent += spentOn(d); const ym = d.slice(0, 7); parts[ym] = (parts[ym] || 0) + b; }
+  for (let i = 0; i < 7; i++) { const d = addDays(mon, i); const b = dayBudget(d); budget += b; spent += spentOn(d); const ym = cycleOf(d); parts[ym] = (parts[ym] || 0) + b; }
   return { budget, spent, parts };
 }
 /* État d'une semaine avec report des semaines précédentes */
@@ -158,7 +169,7 @@ function weekState(mon) {
 }
 
 /* ---------- Navigation & rendu ---------- */
-const ui = { tab: 'week', week: mondayOf(today()), month: curYm() };
+const ui = { tab: 'week', week: mondayOf(today()), month: today().slice(0, 7) };
 function go(tab, fromHistory) {
   if (!fromHistory) { if (tab !== 'week' && ui.tab === 'week') history.pushState({ tab }, ''); else if (tab !== 'week') history.replaceState({ tab }, ''); else if (ui.tab !== 'week' && history.state && history.state.tab) { ui.tab = 'week'; history.back(); return; } }
   ui.tab = tab; render(); window.scrollTo(0, 0);
@@ -208,7 +219,7 @@ function viewWeek() {
   const t = today(), isCur = t >= mon && t <= sun;
   let perday = '';
   if (isCur) { const left = Math.round((parseD(sun) - parseD(t)) / 864e5) + 1; perday = st.avail === 0 && st.spent === 0 ? '' : st.remain > 0 ? `≈ ${fmt(st.remain / left)} par jour pendant ${left} jour${left > 1 ? 's' : ''}` : 'Budget de la semaine épuisé'; }
-  const partsTxt = Object.keys(st.parts).length > 1 ? Object.entries(st.parts).map(([ym, v]) => `${fmt(v)} de ${fdate(ym + '-01', { month: 'long' })}`).join(' + ') : '';
+  const partsTxt = Object.keys(st.parts).length > 1 ? Object.entries(st.parts).map(([ym, v]) => `${fmt(v)} de budget de ${fdate(ym + '-01', { month: 'long' })}`).join(' + ') : '';
   const leftRatio = st.avail > 0 ? Math.min(1, Math.max(0, st.remain / st.avail)) : 0;
   const C = 2 * Math.PI * 52;
   let mood;
@@ -278,12 +289,12 @@ function viewMonth() {
   const est = estimatesFor(ym), tInc = inc.reduce((s, i) => s + i.amount, 0) + est.reduce((s, t) => s + t.amount, 0), tCh = ch.reduce((s, i) => s + i.amount, 0);
   const pend = pendingVariable(ym);
   const before = ym < startYm();
-  let h = `<header class="topbar"><button class="nav-btn" onclick="A.month(-1)">‹</button><div class="tb-mid"><div class="wk-title cap">${fmonth(ym)}</div><div class="wk-sub">Vue du mois</div></div><button class="nav-btn" onclick="A.month(1)">›</button></header>
+  let h = `<header class="topbar"><button class="nav-btn" onclick="A.month(-1)">‹</button><div class="tb-mid"><div class="wk-title cap">${fmonth(ym)}</div><div class="wk-sub">${cycleDay() === 1 ? 'Vue du mois' : 'Mois budgétaire ' + cycleLabel(ym)}</div></div><button class="nav-btn" onclick="A.month(1)">›</button></header>
     <section class="hero ${tInc - tCh < 0 ? 'bad' : 'ok'}"><div class="hero-row"><span class="hero-label">Solde du mois</span></div>
     <div class="remain">${fmt(tInc - tCh)}</div><div class="hero-sub">${fmt(tInc)} de revenus − ${fmt(tCh)} de charges</div></section>`;
   if (before) return h + `<div class="empty">Ce mois est avant la date de début de suivi (${fshort(S.settings.startDate)}).<br>Tu peux la modifier dans Réglages.</div>`;
   h += `<div class="section"><h2>Revenus <button onclick="A.addIncome('${ym}')">+ Ajouter</button></h2><div class="list">`;
-  inc.sort((a, b) => a.date.localeCompare(b.date)).forEach(i => h += `<div class="row" onclick="A.editItem('${i.id}')"><span class="ico">💶</span><div class="mid"><div>${esc(i.name)}</div><small>${i.date.slice(0, 7) === ym ? 'compté à partir du ' + fshort(i.date) : 'compté sur tout le mois'}</small></div><div class="amt pos">+${fmt(i.amount)}</div></div>`);
+  inc.sort((a, b) => a.date.localeCompare(b.date)).forEach(i => h += `<div class="row" onclick="A.editItem('${i.id}')"><span class="ico">💶</span><div class="mid"><div>${esc(i.name)}</div><small>${!i.auto && !(i.date === ym + '-01' && !(S.incomeTypes.find(t => t.id === i.typeId) || {}).variable) && inCycle(i.date, ym) && i.date !== cycleStart(ym) ? 'compté à partir du ' + fshort(i.date) : 'compté sur tout le mois'}</small></div><div class="amt pos">+${fmt(i.amount)}</div></div>`);
   pend.forEach(t => { const e = est.includes(t); h += `<div class="row" onclick="A.addIncome('${ym}','${t.id}')"><span class="ico">⏳</span><div class="mid"><div>${esc(t.name)}</div><small class="pending">${e ? 'Estimation comptée — touche pour saisir le montant réel' : 'En attente — touche pour saisir le montant reçu'}</small></div><div class="amt ${e ? 'pos' : ''}">${e ? '≈ +' + fmt(t.amount) : '—'}</div></div>`; });
   if (!inc.length && !pend.length) h += `<div class="empty">Aucun revenu. Ajoute tes types de revenus dans Réglages.</div>`;
   h += `</div></div><div class="section"><h2>Charges fixes <button onclick="A.addCharge('${ym}')">+ Ajouter</button></h2><div class="list">`;
@@ -291,12 +302,12 @@ function viewMonth() {
   if (!ch.length) h += `<div class="empty">Aucune charge fixe ce mois-ci.</div>`;
   h += `</div></div>`;
   // Répartition par semaine
-  const first = ym + '-01', last = ym + '-' + pad(daysInMonth(ym));
+  const first = cycleStart(ym), last = cycleEnd(ym);
   const arr = monthDaily(ym); const curMon = mondayOf(today());
   h += `<div class="section"><h2>Répartition par semaine</h2><table class="weeks"><tr><th>Semaine</th><th>Dates</th><th>Jours</th><th>Part du mois</th></tr>`;
   for (let m = mondayOf(first); m <= last; m = addDays(m, 7)) {
     let days = 0, part = 0;
-    for (let i = 0; i < 7; i++) { const d = addDays(m, i); if (d >= first && d <= last && d >= S.settings.startDate) { days++; part += arr[parseD(d).getUTCDate() - 1]; } }
+    for (let i = 0; i < 7; i++) { const d = addDays(m, i); if (d >= first && d <= last && d >= S.settings.startDate) { days++; part += arr[dayIdx(d, ym)]; } }
     h += `<tr class="${m === curMon ? 'cur' : ''}" onclick="A.openWeek('${m}')"><td><b>S${isoWeek(m).w}</b></td><td>${fshort(m)} → ${fshort(addDays(m, 6))}</td><td>${days}</td><td><b>${fmt(part)}</b></td></tr>`;
   }
   h += `</table><p class="help">Les charges sont réparties sur tous les jours du mois ; chaque revenu à partir de sa date de réception. Une semaine à cheval prend une part de chaque mois.</p></div>`;
@@ -328,6 +339,8 @@ function viewSettings() {
   h += `<div class="section"><h2>Options</h2><div class="list" style="padding:4px 14px">
     <label class="chk"><input type="checkbox" ${st.carryOver ? 'checked' : ''} onchange="A.setCarry(this.checked)"> Reporter le reste (ou le dépassement) sur la semaine suivante</label>
     <label class="f"><span>Thème de l’affichage</span><select onchange="A.setTheme(this.value)">${[['dark','🌙 Sombre (recommandé)'],['light','☀️ Clair'],['auto','Automatique (comme le téléphone)']].map(([v,l])=>`<option value="${v}" ${(st.theme||'dark')===v?'selected':''}>${l}</option>`).join('')}</select></label>
+    <label class="f"><span>Début du mois budgétaire</span><select onchange="A.setCycle(this.value)">${[1, ...Array.from({ length: 27 }, (_, i) => i + 2)].map(d => `<option value="${d}" ${cycleDay() === d ? 'selected' : ''}>${d === 1 ? 'Le 1er (mois civil)' : 'Le ' + d + ' du mois précédent'}</option>`).join('')}</select></label>
+    <p class="help">Choisis le jour où arrive ton salaire : avec « le 25 », le budget de novembre va du 25 octobre au 24 novembre.</p>
     <label class="f"><span>Début du suivi (le budget est calculé à partir de cette date)</span><input type="date" value="${st.startDate}" onchange="A.setStart(this.value)"></label></div></div>`;
   h += `<div class="section"><h2>Sauvegarde Google Drive</h2><div class="list" style="padding:4px 14px 14px">
     <label class="f"><span>Identifiant client Google (voir le guide d’installation)</span><input id="cid" value="${esc(clientId())}" placeholder="xxxxxxxx.apps.googleusercontent.com"></label><button class="btn ghost block" onclick="A.setClientId($('#cid').value)">Enregistrer l’identifiant</button>${(window.BUDGET_CONFIG || {}).googleClientId ? '<p class="help">✅ Identifiant intégré à l’application (fichier config.js).</p>' : ''}
@@ -800,17 +813,17 @@ const A = {
   addIncome(ym, typeId) {
     const types = S.incomeTypes.filter(t => t.active); if (!types.length) { toast('Ajoute d’abord un type de revenu dans Réglages'); return; }
     const t0 = types.find(t => t.id === typeId) || types[0];
-    const d = ym === curYm() ? today() : ym + '-01';
+    const d = ym === curYm() ? today() : cycleStart(ym);
     form('Revenu reçu — ' + fmonth(ym), [
       { k: 'typeId', l: 'Type de revenu', t: 'select', o: types.map(t => ({ v: t.id, l: t.name })) },
       { k: 'amount', l: 'Montant reçu (F CFP)', t: 'money' },
-      { k: 'date', l: 'Date de réception', t: 'date', help: 'Le montant est réparti sur les jours restants du mois à partir de cette date. Pour le salaire reçu le 25 du mois précédent, laisse le 1er du mois.' }],
-      { typeId: t0.id, amount: t0.variable ? (t0.amount || '') : t0.amount, date: t0.variable ? d : ym + '-01' },
-      v => { if (v.amount <= 0) { toast('Indique un montant'); return false; } const t = S.incomeTypes.find(x => x.id === v.typeId); put('monthItems', { id: uid(), month: ym, kind: 'income', typeId: v.typeId, name: t.name, amount: v.amount, date: v.date || ym + '-01', auto: false }); toast('Revenu ajouté, semaines recalculées'); });
+      { k: 'date', l: 'Compté à partir du', t: 'date', help: 'Le montant est réparti sur les jours restants du mois budgétaire à partir de cette date. Tu peux mettre la date de facturation si le montant est déjà connu, même si le virement arrive plus tard.' }],
+      { typeId: t0.id, amount: t0.variable ? (t0.amount || '') : t0.amount, date: t0.variable ? d : cycleStart(ym) },
+      v => { if (v.amount <= 0) { toast('Indique un montant'); return false; } const t = S.incomeTypes.find(x => x.id === v.typeId); put('monthItems', { id: uid(), month: ym, kind: 'income', typeId: v.typeId, name: t.name, amount: v.amount, date: v.date || cycleStart(ym), auto: false }); toast('Revenu ajouté, semaines recalculées'); });
   },
   addCharge(ym) {
     form('Charge — ' + fmonth(ym), [{ k: 'name', l: 'Libellé', ph: 'ex. Réparation voiture' }, { k: 'amount', l: 'Montant (F CFP)', t: 'money' }], {},
-      v => { if (!v.name || v.amount <= 0) { toast('Libellé et montant requis'); return false; } put('monthItems', { id: uid(), month: ym, kind: 'charge', typeId: null, name: v.name, amount: v.amount, date: ym + '-01', auto: false }); });
+      v => { if (!v.name || v.amount <= 0) { toast('Libellé et montant requis'); return false; } put('monthItems', { id: uid(), month: ym, kind: 'charge', typeId: null, name: v.name, amount: v.amount, date: cycleStart(ym), auto: false }); });
   },
   editItem(id) {
     const it = S.monthItems.find(i => i.id === id);
@@ -847,6 +860,7 @@ const A = {
       id ? () => { const n = S.expenses.filter(e => e.categoryId === id).length; if (n) { alert(`Impossible : ${n} dépense(s) utilisent cette catégorie. Renomme-la plutôt.`); return; } remove('categories', id); } : null);
   },
   setTheme(v) { S.settings.theme = v; saveSettings(); applyTheme(); },
+  setCycle(v) { S.settings.cycleDay = +v; saveSettings(); ui.month = curYm(); toast(+v === 1 ? 'Mois civil' : 'Mois budgétaire du ' + v + ' au ' + (v - 1)); render(); },
   setCarry(v) { S.settings.carryOver = v; saveSettings(); },
   setStart(v) { if (!v) return; S.settings.startDate = v; saveSettings(); toast('Date de début mise à jour'); },
   setClientId(v) { S.settings.clientId = v.trim(); gToken = null; saveSettings(); toast('Identifiant enregistré'); },
@@ -921,6 +935,7 @@ $('#fab').onclick = () => sheet(`<h3>Ajouter</h3>
   if (!S.settings) defaults();
   else for (const s of LIST_STORES) S[s] = await dbAll(s);
   S.settings.months = S.settings.months || {};
+  ui.month = curYm();
   applyTheme();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
