@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.1.1';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 // Moteur de lecture (Tesseract.js 5.1.1, licence Apache 2.0) hébergé avec l'app, dans le dossier tesseract/
@@ -159,7 +159,16 @@ function weekState(mon) {
 
 /* ---------- Navigation & rendu ---------- */
 const ui = { tab: 'week', week: mondayOf(today()), month: curYm() };
-function go(tab) { ui.tab = tab; render(); window.scrollTo(0, 0); }
+function go(tab, fromHistory) {
+  if (!fromHistory) { if (tab !== 'week' && ui.tab === 'week') history.pushState({ tab }, ''); else if (tab !== 'week') history.replaceState({ tab }, ''); else if (ui.tab !== 'week' && history.state && history.state.tab) { ui.tab = 'week'; history.back(); return; } }
+  ui.tab = tab; render(); window.scrollTo(0, 0);
+}
+let ignorePop = false;
+window.addEventListener('popstate', () => {
+  if (ignorePop) { ignorePop = false; return; }                                   // retour déclenché par la fermeture d'une fenêtre
+  if (!$('#sheet').classList.contains('hidden')) { closeSheet(true); return; }  // bouton retour du téléphone : ferme la fenêtre
+  if (ui.tab !== 'week') go('week', true); else { render(); window.scrollTo(0, 0); }
+});
 function render() {
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === ui.tab));
   $('#fab').classList.toggle('hidden', ui.tab === 'settings');
@@ -303,7 +312,7 @@ function viewMonth() {
 
 function viewSettings() {
   const st = S.settings;
-  let h = `<header class="topbar"><div class="tb-mid"><div class="wk-title">Réglages</div><div class="wk-sub">Revenus, charges, catégories et sauvegarde</div></div></header>`;
+  let h = `<header class="topbar"><button class="nav-btn" onclick="go('week')" aria-label="Retour à l’accueil">‹</button><div class="tb-mid"><div class="wk-title">Réglages</div><div class="wk-sub">Revenus, charges, catégories et sauvegarde</div></div><span class="nav-spacer"></span></header>`;
   h += `<div class="section"><h2>Types de revenus <button onclick="A.incomeType()">+ Ajouter</button></h2><div class="list">`;
   S.incomeTypes.forEach(t => h += `<div class="row" onclick="A.incomeType('${t.id}')"><span class="ico">💶</span><div class="mid"><div>${esc(t.name)}${t.active ? '' : ' (inactif)'}</div><small>${t.variable ? (t.estimate ? 'Variable · estimation comptée en attendant' : 'Variable · compté à réception') : 'Fixe, chaque mois'}</small></div><div class="amt">${t.variable ? (t.amount ? '≈ ' + fmt(t.amount) : '—') : fmt(t.amount)}</div></div>`);
   h += `</div></div><div class="section"><h2>Charges fixes <button onclick="A.chargeType()">+ Ajouter</button></h2><div class="list">`;
@@ -334,8 +343,8 @@ function viewSettings() {
 }
 
 /* ---------- Feuille modale ---------- */
-function sheet(html) { const s = $('#sheet'); s.querySelector('.sheet-body').innerHTML = html; s.classList.remove('hidden'); document.body.style.overflow = 'hidden'; }
-function closeSheet() { $('#sheet').classList.add('hidden'); document.body.style.overflow = ''; }
+function sheet(html) { const s = $('#sheet'); const wasOpen = !s.classList.contains('hidden'); s.querySelector('.sheet-body').innerHTML = html; s.classList.remove('hidden'); document.body.style.overflow = 'hidden'; if (!wasOpen) history.pushState({ sheet: 1 }, ''); }
+function closeSheet(fromHistory) { const s = $('#sheet'); if (s.classList.contains('hidden')) return; s.classList.add('hidden'); document.body.style.overflow = ''; if (fromHistory !== true && history.state && history.state.sheet) { ignorePop = true; history.back(); } }
 $('#sheet .sheet-bg').onclick = closeSheet;
 
 /* Formulaire générique */
@@ -903,8 +912,8 @@ function applyTheme() {
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => go(b.dataset.tab));
 $('#fab').onclick = () => sheet(`<h3>Ajouter</h3>
   <div class="choice">
-    <button class="choice-btn" onclick="closeSheet();A.expense()"><span>🧾</span><b>Une dépense</b><small>courses, carburant, ticket photo…</small></button>
-    <button class="choice-btn" onclick="closeSheet();A.addIncome(curYm(), (pendingVariable(curYm())[0] || {}).id)"><span>💶</span><b>Un revenu reçu</b><small>revenu complémentaire, prime, remboursement…</small></button>
+    <button class="choice-btn" onclick="A.expense()"><span>🧾</span><b>Une dépense</b><small>courses, carburant, ticket photo…</small></button>
+    <button class="choice-btn" onclick="A.addIncome(curYm(), (pendingVariable(curYm())[0] || {}).id)"><span>💶</span><b>Un revenu reçu</b><small>revenu complémentaire, prime, remboursement…</small></button>
   </div>`);
 (async function start() {
   db = await openDB();
