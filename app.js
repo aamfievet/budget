@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.1.0';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 // Moteur de lecture (Tesseract.js 5.1.1, licence Apache 2.0) hébergé avec l'app, dans le dossier tesseract/
@@ -130,6 +130,7 @@ function monthDaily(ym) {
       const from = i.kind === 'charge' ? 0 : (i.date && i.date.slice(0, 7) === ym) ? parseD(i.date).getUTCDate() - 1 : 0;
       byStart[from] = (byStart[from] || 0) + (i.kind === 'charge' ? -i.amount : i.amount);
     });
+    estimatesFor(ym).forEach(t => { byStart[0] = (byStart[0] || 0) + t.amount; }); // revenus variables comptés en estimation
     Object.entries(byStart).forEach(([from, amt]) => spread(arr, amt, +from));
   }
   cache.daily.set(ym, arr);
@@ -178,8 +179,13 @@ function banners() {
   const lb = S.settings.lastBackup;
   if (!noIncome && S.expenses.length && (!lb || Date.now() - lb > 7 * 864e5)) h += `<div class="banner">☁️ ${lb ? 'Dernière sauvegarde il y a plus de 7 jours.' : 'Aucune sauvegarde pour l’instant.'} <br><button class="btn" onclick="A.backup()">Sauvegarder sur Google Drive</button></div>`;
   const pend = pendingVariable(curYm());
-  if (pend.length) h += `<div class="banner">⏳ En attente ce mois-ci : <b>${pend.map(t => esc(t.name)).join(', ')}</b>. Dès réception, saisis le montant pour mettre à jour tes semaines.<br><button class="btn" onclick="A.addIncome('${curYm()}','${pend[0].id}')">Saisir le montant reçu</button></div>`;
+  if (pend.length) h += `<div class="banner">⏳ En attente ce mois-ci : <b>${pend.map(t => esc(t.name)).join(', ')}</b>${estimatesFor(curYm()).length ? ' (estimation déjà comptée)' : ''}. Dès réception, saisis le montant réel pour mettre à jour tes semaines.<br><button class="btn" onclick="A.addIncome('${curYm()}','${pend[0].id}')">Saisir le montant reçu</button></div>`;
   return h;
+}
+/* Revenus variables pas encore saisis ce mois-ci, mais dont l'estimation doit être comptée */
+function estimatesFor(ym) {
+  if (ym < startYm()) return [];
+  return S.incomeTypes.filter(t => t.active && t.variable && t.estimate && t.amount > 0 && !S.monthItems.some(i => i.month === ym && i.typeId === t.id));
 }
 function pendingVariable(ym) {
   if (ym < startYm()) return [];
@@ -260,7 +266,7 @@ function viewMonth() {
   const ym = ui.month; ensureMonth(ym);
   const items = S.monthItems.filter(i => i.month === ym);
   const inc = items.filter(i => i.kind === 'income'), ch = items.filter(i => i.kind === 'charge');
-  const tInc = inc.reduce((s, i) => s + i.amount, 0), tCh = ch.reduce((s, i) => s + i.amount, 0);
+  const est = estimatesFor(ym), tInc = inc.reduce((s, i) => s + i.amount, 0) + est.reduce((s, t) => s + t.amount, 0), tCh = ch.reduce((s, i) => s + i.amount, 0);
   const pend = pendingVariable(ym);
   const before = ym < startYm();
   let h = `<header class="topbar"><button class="nav-btn" onclick="A.month(-1)">‹</button><div class="tb-mid"><div class="wk-title cap">${fmonth(ym)}</div><div class="wk-sub">Vue du mois</div></div><button class="nav-btn" onclick="A.month(1)">›</button></header>
@@ -269,7 +275,7 @@ function viewMonth() {
   if (before) return h + `<div class="empty">Ce mois est avant la date de début de suivi (${fshort(S.settings.startDate)}).<br>Tu peux la modifier dans Réglages.</div>`;
   h += `<div class="section"><h2>Revenus <button onclick="A.addIncome('${ym}')">+ Ajouter</button></h2><div class="list">`;
   inc.sort((a, b) => a.date.localeCompare(b.date)).forEach(i => h += `<div class="row" onclick="A.editItem('${i.id}')"><span class="ico">💶</span><div class="mid"><div>${esc(i.name)}</div><small>${i.date.slice(0, 7) === ym ? 'compté à partir du ' + fshort(i.date) : 'compté sur tout le mois'}</small></div><div class="amt pos">+${fmt(i.amount)}</div></div>`);
-  pend.forEach(t => h += `<div class="row" onclick="A.addIncome('${ym}','${t.id}')"><span class="ico" style="--h:40">⏳</span><div class="mid"><div>${esc(t.name)}</div><small class="pending">En attente — touche pour saisir le montant reçu</small></div><div class="amt">—</div></div>`);
+  pend.forEach(t => { const e = est.includes(t); h += `<div class="row" onclick="A.addIncome('${ym}','${t.id}')"><span class="ico">⏳</span><div class="mid"><div>${esc(t.name)}</div><small class="pending">${e ? 'Estimation comptée — touche pour saisir le montant réel' : 'En attente — touche pour saisir le montant reçu'}</small></div><div class="amt ${e ? 'pos' : ''}">${e ? '≈ +' + fmt(t.amount) : '—'}</div></div>`; });
   if (!inc.length && !pend.length) h += `<div class="empty">Aucun revenu. Ajoute tes types de revenus dans Réglages.</div>`;
   h += `</div></div><div class="section"><h2>Charges fixes <button onclick="A.addCharge('${ym}')">+ Ajouter</button></h2><div class="list">`;
   ch.sort((a, b) => b.amount - a.amount).forEach(i => h += `<div class="row" onclick="A.editItem('${i.id}')"><span class="ico" style="--h:20">📄</span><div class="mid"><div>${esc(i.name)}</div></div><div class="amt neg">−${fmt(i.amount)}</div></div>`);
@@ -299,11 +305,13 @@ function viewSettings() {
   const st = S.settings;
   let h = `<header class="topbar"><div class="tb-mid"><div class="wk-title">Réglages</div><div class="wk-sub">Revenus, charges, catégories et sauvegarde</div></div></header>`;
   h += `<div class="section"><h2>Types de revenus <button onclick="A.incomeType()">+ Ajouter</button></h2><div class="list">`;
-  S.incomeTypes.forEach(t => h += `<div class="row" onclick="A.incomeType('${t.id}')"><span class="ico">💶</span><div class="mid"><div>${esc(t.name)}${t.active ? '' : ' (inactif)'}</div><small>${t.variable ? 'Montant variable, saisi chaque mois' : 'Fixe, chaque mois'}</small></div><div class="amt">${t.variable ? '—' : fmt(t.amount)}</div></div>`);
+  S.incomeTypes.forEach(t => h += `<div class="row" onclick="A.incomeType('${t.id}')"><span class="ico">💶</span><div class="mid"><div>${esc(t.name)}${t.active ? '' : ' (inactif)'}</div><small>${t.variable ? (t.estimate ? 'Variable · estimation comptée en attendant' : 'Variable · compté à réception') : 'Fixe, chaque mois'}</small></div><div class="amt">${t.variable ? (t.amount ? '≈ ' + fmt(t.amount) : '—') : fmt(t.amount)}</div></div>`);
   h += `</div></div><div class="section"><h2>Charges fixes <button onclick="A.chargeType()">+ Ajouter</button></h2><div class="list">`;
   S.chargeTypes.forEach(t => h += `<div class="row" onclick="A.chargeType('${t.id}')"><span class="ico" style="--h:20">📄</span><div class="mid"><div>${esc(t.name)}${t.active ? '' : ' (inactif)'}</div></div><div class="amt">${fmt(t.amount)}</div></div>`);
   const tI = S.incomeTypes.filter(t => t.active && !t.variable).reduce((s, t) => s + t.amount, 0), tC = S.chargeTypes.filter(t => t.active).reduce((s, t) => s + t.amount, 0);
-  h += `<div class="row total-row"><span class="ico">=</span><div class="mid"><div>Solde mensuel de base</div><small>revenus fixes − charges (hors revenus variables)</small></div><div class="amt ${tI - tC < 0 ? 'neg' : 'pos'}">${fmt(tI - tC)}</div></div>`;
+  const tV = S.incomeTypes.filter(t => t.active && t.variable).reduce((s, t) => s + (t.amount || 0), 0);
+  h += `<div class="row total-row"><span class="ico">=</span><div class="mid"><div>Solde mensuel de base</div><small>revenus fixes − charges</small></div><div class="amt ${tI - tC < 0 ? 'neg' : 'pos'}">${fmt(tI - tC)}</div></div>`;
+  if (tV) h += `<div class="row total-row"><span class="ico">≈</span><div class="mid"><div>Avec les revenus variables</div><small>en comptant leurs montants habituels</small></div><div class="amt ${tI + tV - tC < 0 ? 'neg' : 'pos'}">${fmt(tI + tV - tC)}</div></div>`;
   h += `</div><p class="help">Une modification s’applique au mois en cours et aux suivants. Pour un changement ponctuel, modifie la ligne dans l’onglet Mois.</p></div>`;
   h += `<div class="section"><h2>Catégories de dépenses <button onclick="A.category()">+ Ajouter</button></h2><div class="list">`;
   S.categories.forEach(c => h += `<div class="row" onclick="A.category('${c.id}')"><span class="ico" style="--h:${catHue(c.id)}">${c.icon}</span><div class="mid"><div>${esc(c.name)}</div><small>${esc(c.keywords || 'aucun mot-clé')}</small></div></div>`);
@@ -788,7 +796,7 @@ const A = {
       { k: 'typeId', l: 'Type de revenu', t: 'select', o: types.map(t => ({ v: t.id, l: t.name })) },
       { k: 'amount', l: 'Montant reçu (F CFP)', t: 'money' },
       { k: 'date', l: 'Date de réception', t: 'date', help: 'Le montant est réparti sur les jours restants du mois à partir de cette date. Pour le salaire reçu le 25 du mois précédent, laisse le 1er du mois.' }],
-      { typeId: t0.id, amount: t0.variable ? '' : t0.amount, date: t0.variable ? d : ym + '-01' },
+      { typeId: t0.id, amount: t0.variable ? (t0.amount || '') : t0.amount, date: t0.variable ? d : ym + '-01' },
       v => { if (v.amount <= 0) { toast('Indique un montant'); return false; } const t = S.incomeTypes.find(x => x.id === v.typeId); put('monthItems', { id: uid(), month: ym, kind: 'income', typeId: v.typeId, name: t.name, amount: v.amount, date: v.date || ym + '-01', auto: false }); toast('Revenu ajouté, semaines recalculées'); });
   },
   addCharge(ym) {
@@ -807,8 +815,9 @@ const A = {
     const t = id ? S.incomeTypes.find(x => x.id === id) : { id: uid(), name: '', variable: false, amount: 0, active: true };
     form(id ? 'Modifier le revenu' : 'Nouveau type de revenu', [
       { k: 'name', l: 'Nom', ph: 'ex. Salaire' },
-      { k: 'variable', l: 'Montant variable (je le saisis chaque mois à réception)', t: 'chk' },
-      { k: 'amount', l: 'Montant mensuel habituel (si fixe)', t: 'money' },
+      { k: 'variable', l: 'Montant variable (je saisis le montant réel chaque mois à réception)', t: 'chk' },
+      { k: 'amount', l: 'Montant mensuel (fixe) ou montant habituel (variable)', t: 'money' },
+      { k: 'estimate', l: 'Si variable : compter ce montant habituel en attendant le montant réel', t: 'chk', help: 'Décoché (prudent) : le revenu variable n’est compté qu’une fois reçu et saisi. Coché : le montant habituel est compté dès le début du mois, puis remplacé par le montant réel.' },
       { k: 'active', l: 'Actif', t: 'chk' }], t,
       v => { if (!v.name) { toast('Nom requis'); return false; } const n = { ...t, ...v }; put('incomeTypes', n); syncType('income', n); },
       id ? () => { syncType('income', t, true); remove('incomeTypes', id); } : null);
@@ -892,7 +901,11 @@ function applyTheme() {
 
 /* ---------- Démarrage ---------- */
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => go(b.dataset.tab));
-$('#fab').onclick = () => A.expense();
+$('#fab').onclick = () => sheet(`<h3>Ajouter</h3>
+  <div class="choice">
+    <button class="choice-btn" onclick="closeSheet();A.expense()"><span>🧾</span><b>Une dépense</b><small>courses, carburant, ticket photo…</small></button>
+    <button class="choice-btn" onclick="closeSheet();A.addIncome(curYm(), (pendingVariable(curYm())[0] || {}).id)"><span>💶</span><b>Un revenu reçu</b><small>revenu complémentaire, prime, remboursement…</small></button>
+  </div>`);
 (async function start() {
   db = await openDB();
   S.settings = await dbGet('settings', 'main');
