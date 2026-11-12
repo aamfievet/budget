@@ -2,10 +2,12 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '1.8.1';
+const APP_VERSION = '1.9.0';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
-const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+// Moteur de lecture (Tesseract.js 5.1.1, licence Apache 2.0) hébergé avec l'app, dans le dossier tesseract/
+const TESSERACT_URL = 'tesseract/tesseract.min.js';
+const TESS_OPTS = { workerPath: 'tesseract/worker.min.js', corePath: 'tesseract', langPath: 'tesseract/lang' };
 
 /* ---------- Outils dates (toujours en UTC pour éviter les décalages) ---------- */
 const pad = n => String(n).padStart(2, '0');
@@ -363,7 +365,7 @@ function loadScript(src) { return new Promise((res, rej) => { const s = document
 async function ocrReceipt(img, anchor, onProgress) {
   if (!window.Tesseract) { tessLoading = tessLoading || loadScript(TESSERACT_URL); await tessLoading; }
   let pass = 1;
-  const worker = await Tesseract.createWorker('fra', 1, { logger: m => m.status === 'recognizing text' && onProgress && onProgress(pass, Math.round(m.progress * 100)) });
+  const worker = await Tesseract.createWorker('fra', 1, { ...TESS_OPTS, logger: m => m.status === 'recognizing text' && onProgress && onProgress(pass, Math.round(m.progress * 100)) });
   try {
     const canvas = drawScaled(img, 1800, true);
     await worker.setParameters({ tessedit_pageseg_mode: '3' });
@@ -424,7 +426,12 @@ function findDate(text, anchor) {
     return s >= min && s <= max ? s : null;
   };
   let m; const re1 = /(\d{1,2})\s*[\/.-]\s*(\d{1,2})\s*[\/.-]\s*(\d{4}|\d{2})(?!\d)/g;
-  while ((m = re1.exec(t))) cands.push([m.index, ok(m[3], m[2], m[1]), /^\s*\d{1,2}\s*[:hH]\s*\d{2}/.test(t.slice(m.index + m[0].length, m.index + m[0].length + 12))]);
+  while ((m = re1.exec(t))) {
+    const timed = /^\s*\d{1,2}\s*[:hH]\s*\d{2}/.test(t.slice(m.index + m[0].length, m.index + m[0].length + 12));
+    cands.push([m.index, ok(m[3], m[2], m[1]), timed]);
+    // jour à un seul chiffre : souvent un chiffre perdu à la lecture (« 2/11 » pour « 12/11 ») → on essaie 1x, 2x, 3x
+    if (m[1].length === 1) ['1', '2', '3'].forEach(p => cands.push([m.index, ok(m[3], m[2], p + m[1]), timed]));
+  }
   const re2 = /(20\d{2})-(\d{2})-(\d{2})/g;
   while ((m = re2.exec(t))) cands.push([m.index, ok(m[1], m[2], m[3])]);
   const re3 = /(\d{1,2})\s*(jan\w*|f[ée]v\w*|mar\w*|avr\w*|mai|juin|juil\w*|ao[uû]\w*|sep\w*|oct\w*|nov\w*|d[ée]c\w*)\.?\s*(\d{4}|\d{2})?/gi;
@@ -692,7 +699,7 @@ async function handlePhoto(file) {
       + `<details style="margin-top:6px"><summary>Voir le texte lu</summary><pre style="white-space:pre-wrap;font-size:12px;margin:6px 0 0">${esc(text)}</pre></details>`;
   } catch (err) {
     console.error(err);
-    if ($('#ocr')) $('#ocr').textContent = draft.newBlob ? '⚠️ Lecture automatique indisponible (connexion internet nécessaire). Saisis le montant à la main, la photo est conservée.' : '⚠️ Impossible de lire cette image.';
+    if ($('#ocr')) $('#ocr').textContent = draft.newBlob ? '⚠️ Lecture automatique indisponible pour le moment (le moteur de lecture se met en place au premier scan avec internet). Saisis le montant à la main, la photo est conservée.' : '⚠️ Impossible de lire cette image.';
   }
 }
 
