@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '2.3.1';
+const APP_VERSION = '2.4.0';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 // Moteur de lecture (Tesseract.js 5.1.1, licence Apache 2.0) hébergé avec l'app, dans le dossier tesseract/
@@ -104,7 +104,37 @@ const cycleOf = s => pOf(s, cycleDay());
 const dayIdx = (s, ym) => pIdx(s, ym, cycleDay());
 const inCycle = (s, ym) => !!s && s >= cycleStart(ym) && s <= cycleEnd(ym);
 /* Chaque revenu a sa propre période (ex. salaire du 25 au 24, revenu complémentaire du 1er au 30/31) */
-const incDay = t => Math.min(28, Math.max(1, +((t && t.periodDay) || cycleDay())));
+const isSliding = t => !!t && t.periodDay === 0; // période glissante : 1 mois à partir de la date saisie
+const incDay = t => isSliding(t) ? 1 : Math.min(28, Math.max(1, +((t && t.periodDay) || cycleDay())));
+/* Même jour le mois suivant (31 jan → 28/29 fév) */
+const addMonthDate = (s, n) => { const [y, m, d] = s.split('-').map(Number); const last = new Date(Date.UTC(y, m - 1 + n + 1, 0)).getUTCDate(); return ymd(new Date(Date.UTC(y, m - 1 + n, Math.min(d, last)))); };
+const slideItems = t => S.monthItems.filter(i => i.kind === 'income' && i.typeId === t.id).sort((a, b) => a.date.localeCompare(b.date));
+/* Fin de la période d'une saisie : 1 mois plus tard, ou la veille de la saisie suivante si elle arrive avant */
+function slideEndOf(i) {
+  const max = addDays(addMonthDate(i.date, 1), -1);
+  const next = S.monthItems.filter(x => x.kind === 'income' && x.typeId === i.typeId && x.date > i.date).map(x => x.date).sort()[0];
+  return next && addDays(next, -1) < max ? addDays(next, -1) : max;
+}
+const slideLenOf = i => Math.round((parseD(slideEndOf(i)) - parseD(i.date)) / 864e5) + 1;
+const slideCovers = (t, s) => slideItems(t).some(i => s >= i.date && s <= slideEndOf(i));
+/* Part d'un revenu à période glissante pour le jour s */
+function slideOn(t, s) {
+  let v = 0;
+  if (!t.variable) ensureIncome(t, s.slice(0, 7));
+  slideItems(t).forEach(i => {
+    if (s < i.date || s > slideEndOf(i)) return;
+    const ck = 's|' + i.id; let arr = cache.daily.get(ck);
+    if (!arr) { arr = new Array(slideLenOf(i)).fill(0); spread(arr, i.amount, 0); cache.daily.set(ck, arr); }
+    v += arr[Math.round((parseD(s) - parseD(i.date)) / 864e5)];
+  });
+  // jour non couvert par un montant saisi : estimation éventuelle (montant habituel réparti sur le mois civil)
+  if (!v && t.active && t.estimate && t.amount > 0 && !slideCovers(t, s)) {
+    const ym = s.slice(0, 7), ck = 'se|' + t.id + '|' + ym + '|' + t.amount; let arr = cache.daily.get(ck);
+    if (!arr) { arr = new Array(pLen(ym, 1)).fill(0); spread(arr, t.amount, 0); cache.daily.set(ck, arr); }
+    v = arr[parseD(s).getUTCDate() - 1];
+  }
+  return v;
+}
 const incTypeOf = id => S.incomeTypes.find(t => t.id === id) || { id, name: 'Revenu', variable: false, periodDay: cycleDay(), active: false };
 const cycleLabel = ym => cycleDay() === 1 ? '' : `du ${fshort(cycleStart(ym))} au ${fshort(cycleEnd(ym))}`;
 const curYm = () => cycleOf(today());
@@ -187,12 +217,12 @@ function incomeTypesAll() {
   S.monthItems.forEach(i => { if (i.kind === 'income' && !list.some(t => t.id === i.typeId)) list.push(incTypeOf(i.typeId)); });
   return list;
 }
-function incomeOn(s) { return incomeTypesAll().reduce((sum, t) => { const p = incDay(t), K = pOf(s, p); return sum + incomeDaily(t, K)[pIdx(s, K, p)]; }, 0); }
+function incomeOn(s) { return incomeTypesAll().reduce((sum, t) => { if (isSliding(t)) return sum + slideOn(t, s); const p = incDay(t), K = pOf(s, p); return sum + incomeDaily(t, K)[pIdx(s, K, p)]; }, 0); }
 const dayBudget = s => { if (s < S.settings.startDate) return 0; const ym = cycleOf(s); return incomeOn(s) + chargeDaily(ym)[dayIdx(s, ym)]; };
 function monthDaily(ym) { const a = []; for (let d = cycleStart(ym); d <= cycleEnd(ym); d = addDays(d, 1)) a.push(dayBudget(d)); return a; }
 function spentOn(s) {
   if (!cache.spentByDay) { cache.spentByDay = new Map(); S.expenses.forEach(e => cache.spentByDay.set(e.date, (cache.spentByDay.get(e.date) || 0) + e.amount)); }
-  return cache.spentByDay.get(s) || 0;
+  return s < S.settings.startDate ? 0 : (cache.spentByDay.get(s) || 0); // dépenses d'avant le début du suivi ignorées
 }
 function weekRaw(mon) {
   let budget = 0, spent = 0; const parts = {};
@@ -265,13 +295,15 @@ function banners() {
 }
 /* Revenus variables pas encore saisis ce mois-ci, mais dont l'estimation doit être comptée */
 const incKeyFor = (t, ym) => pOf(ym === curYm() ? today() : cycleEnd(ym), incDay(t)); // période du revenu à saisir pour ce mois budgétaire
+const incRef = ym => ym === curYm() ? today() : cycleEnd(ym);
+const hasEntry = (t, ym) => isSliding(t) ? slideCovers(t, incRef(ym)) : S.monthItems.some(i => i.kind === 'income' && i.month === incKeyFor(t, ym) && i.typeId === t.id);
 function estimatesFor(ym) {
   if (ym < startYm()) return [];
-  return S.incomeTypes.filter(t => t.active && t.variable && t.estimate && t.amount > 0 && !S.monthItems.some(i => i.kind === 'income' && i.month === incKeyFor(t, ym) && i.typeId === t.id));
+  return S.incomeTypes.filter(t => t.active && t.variable && t.estimate && t.amount > 0 && !hasEntry(t, ym));
 }
 function pendingVariable(ym) {
   if (ym < startYm()) return [];
-  return S.incomeTypes.filter(t => t.active && t.variable && !S.monthItems.some(i => i.kind === 'income' && i.month === incKeyFor(t, ym) && i.typeId === t.id));
+  return S.incomeTypes.filter(t => t.active && t.variable && !hasEntry(t, ym));
 }
 
 function viewWeek() {
@@ -352,6 +384,15 @@ function viewMonth() {
   let tInc = 0;
   for (let d = c0; d <= c1; d = addDays(d, 1)) tInc += incomeOn(d); // vue complète du mois, même avant le début du suivi
   incomeTypesAll().forEach(t => {
+    if (isSliding(t)) {
+      slideItems(t).forEach(i => {
+        const end = slideEndOf(i), arr = new Array(slideLenOf(i)).fill(0); spread(arr, i.amount, 0);
+        let part = 0; for (let d = c0; d <= c1; d = addDays(d, 1)) if (d >= i.date && d <= end) part += arr[Math.round((parseD(d) - parseD(i.date)) / 864e5)];
+        if (part) inc.push({ ...i, part, from: i.date, to: end });
+      });
+      if (t.estimate && t.amount > 0) { let part = 0; for (let d = c0; d <= c1; d = addDays(d, 1)) if (!slideCovers(t, d)) part += slideOn(t, d); if (part) inc.push({ estimate: true, typeId: t.id, name: t.name, amount: t.amount, part, from: c0, to: c1 }); }
+      return;
+    }
     const p = incDay(t), keys = [...new Set([pOf(c0, p), pOf(c1, p)])];
     keys.forEach(K => incomeEntries(t, K).forEach(e => {
       const arr = new Array(pLen(K, p)).fill(0); spread(arr, e.amount, entryFrom(e, K, p));
@@ -367,7 +408,7 @@ function viewMonth() {
     <div class="remain">${fmt(tInc - tCh)}</div><div class="hero-sub">${fmt(tInc)} de revenus sur la période − ${fmt(tCh)} de charges</div></section>`;
   if (before) return h + `<div class="empty">Ce mois est avant la date de début de suivi (${fshort(S.settings.startDate)}).<br>Tu peux la modifier dans Réglages.</div>`;
   h += `<div class="section"><h2>Revenus <button onclick="A.addIncome('${ym}')">+ Ajouter</button></h2><div class="list">`;
-  inc.sort((a, b) => a.from.localeCompare(b.from)).forEach(i => h += `<div class="row" ${i.id ? `onclick="A.editItem('${i.id}')"` : `onclick="A.addIncome('${ym}','${i.typeId}')"`}><span class="ico">${i.estimate ? '⏳' : '💶'}</span><div class="mid"><div>${esc(i.name)}${i.estimate ? ' (estimation)' : ''}</div><small>du ${fshort(i.from)} au ${fshort(i.to)}${i.part !== i.amount ? ` · ${fmt(i.part)} sur ce mois` : ''}</small></div><div class="amt pos">+${fmt(i.amount)}</div></div>`);
+  inc.sort((a, b) => a.from.localeCompare(b.from)).forEach(i => h += `<div class="row" ${i.id ? `onclick="A.editItem('${i.id}')"` : `onclick="A.addIncome('${ym}','${i.typeId}')"`}><span class="ico">${i.estimate ? '⏳' : '💶'}</span><div class="mid"><div>${esc(i.name)}${i.estimate ? ' (estimation)' : ''}</div><small>du ${fshort(i.from)} au ${fshort(i.to)}${i.estimate ? ` · ≈ ${fmt(i.part)} sur ce mois` : i.part !== i.amount ? ` · ${fmt(i.part)} sur ce mois` : ''}</small></div><div class="amt pos">+${fmt(i.amount)}</div></div>`);
   pend.filter(t => !est.includes(t)).forEach(t => { h += `<div class="row" onclick="A.addIncome('${ym}','${t.id}')"><span class="ico">⏳</span><div class="mid"><div>${esc(t.name)}</div><small class="pending">En attente — touche pour saisir le montant</small></div><div class="amt">—</div></div>`; });
   if (!inc.length && !pend.length) h += `<div class="empty">Aucun revenu. Ajoute tes types de revenus dans Réglages.</div>`;
   h += `</div></div><div class="section"><h2>Charges fixes <button onclick="A.addCharge('${ym}')">+ Ajouter</button></h2><div class="list">`;
@@ -398,7 +439,7 @@ function viewSettings() {
   const st = S.settings;
   let h = `<header class="topbar"><button class="nav-btn" onclick="go('week')" aria-label="Retour à l’accueil">‹</button><div class="tb-mid"><div class="wk-title">Réglages</div><div class="wk-sub">Revenus, charges, catégories et sauvegarde</div></div><span class="nav-spacer"></span></header>`;
   h += `<div class="section"><h2>Types de revenus <button onclick="A.incomeType()">+ Ajouter</button></h2><div class="list">`;
-  S.incomeTypes.forEach(t => h += `<div class="row" onclick="A.incomeType('${t.id}')"><span class="ico">💶</span><div class="mid"><div>${esc(t.name)}${t.active ? '' : ' (inactif)'}</div><small>${t.variable ? (t.estimate ? 'Variable · estimation comptée' : 'Variable · compté à réception') : 'Fixe'} · ${incDay(t) === 1 ? 'du 1er à la fin du mois' : 'du ' + incDay(t) + ' au ' + (incDay(t) - 1)}</small></div><div class="amt">${t.variable ? (t.amount ? '≈ ' + fmt(t.amount) : '—') : fmt(t.amount)}</div></div>`);
+  S.incomeTypes.forEach(t => h += `<div class="row" onclick="A.incomeType('${t.id}')"><span class="ico">💶</span><div class="mid"><div>${esc(t.name)}${t.active ? '' : ' (inactif)'}</div><small>${t.variable ? (t.estimate ? 'Variable · estimation comptée' : 'Variable · compté à réception') : 'Fixe'} · ${isSliding(t) ? '1 mois à partir de la date saisie' : incDay(t) === 1 ? 'du 1er à la fin du mois' : 'du ' + incDay(t) + ' au ' + (incDay(t) - 1)}</small></div><div class="amt">${t.variable ? (t.amount ? '≈ ' + fmt(t.amount) : '—') : fmt(t.amount)}</div></div>`);
   h += `</div></div><div class="section"><h2>Charges fixes <button onclick="A.chargeType()">+ Ajouter</button></h2><div class="list">`;
   S.chargeTypes.forEach(t => h += `<div class="row" onclick="A.chargeType('${t.id}')"><span class="ico" style="--h:20">📄</span><div class="mid"><div>${esc(t.name)}${t.active ? '' : ' (inactif)'}</div></div><div class="amt">${fmt(t.amount)}</div></div>`);
   const tI = S.incomeTypes.filter(t => t.active && !t.variable).reduce((s, t) => s + t.amount, 0), tC = S.chargeTypes.filter(t => t.active).reduce((s, t) => s + t.amount, 0);
@@ -892,7 +933,7 @@ const A = {
       { k: 'amount', l: 'Montant reçu (F CFP)', t: 'money' },
       { k: 'date', l: 'Compté à partir du', t: 'date', help: 'Le montant est réparti à partir de cette date jusqu’à la fin de la période de ce revenu (réglée dans Réglages). Tu peux mettre la date de facturation si le montant est déjà connu, même si le virement arrive plus tard.' }],
       { typeId: t0.id, amount: t0.variable ? (t0.amount || '') : t0.amount, date: t0.variable ? d : pStart(incKeyFor(t0, ym), incDay(t0)) },
-      v => { if (v.amount <= 0) { toast('Indique un montant'); return false; } const t = S.incomeTypes.find(x => x.id === v.typeId); const dt = v.date || today(); put('monthItems', { id: uid(), month: pOf(dt, incDay(t)), kind: 'income', typeId: v.typeId, name: t.name, amount: v.amount, date: dt, auto: false }); toast('Revenu ajouté, semaines recalculées'); });
+      v => { if (v.amount <= 0) { toast('Indique un montant'); return false; } const t = S.incomeTypes.find(x => x.id === v.typeId); const dt = v.date || today(); put('monthItems', { id: uid(), month: isSliding(t) ? dt.slice(0, 7) : pOf(dt, incDay(t)), kind: 'income', typeId: v.typeId, name: t.name, amount: v.amount, date: dt, auto: false }); toast('Revenu ajouté, semaines recalculées'); });
   },
   addCharge(ym) {
     form('Charge — ' + fmonth(ym), [{ k: 'name', l: 'Libellé', ph: 'ex. Réparation voiture' }, { k: 'amount', l: 'Montant (F CFP)', t: 'money' }], {},
@@ -903,7 +944,7 @@ const A = {
     const fields = [{ k: 'amount', l: 'Montant (F CFP)', t: 'money' }];
     if (it.kind === 'income') fields.push({ k: 'date', l: 'Compté à partir du', t: 'date', help: 'Réparti à partir de cette date jusqu’à la fin de la période de ce revenu.' });
     form(it.name + ' — ' + fmonth(it.month), fields, it,
-      v => { const n = { ...it, amount: v.amount, date: v.date || it.date, auto: false }; if (it.kind === 'income' && v.date && v.date !== it.date) n.month = pOf(v.date, incDay(incTypeOf(it.typeId))); put('monthItems', n); },
+      v => { const n = { ...it, amount: v.amount, date: v.date || it.date, auto: false }; if (it.kind === 'income' && v.date && v.date !== it.date) n.month = isSliding(incTypeOf(it.typeId)) ? v.date.slice(0, 7) : pOf(v.date, incDay(incTypeOf(it.typeId))); put('monthItems', n); },
       () => remove('monthItems', id));
   },
   incomeType(id) {
@@ -913,8 +954,8 @@ const A = {
       { k: 'variable', l: 'Montant variable (je saisis le montant réel chaque mois à réception)', t: 'chk' },
       { k: 'amount', l: 'Montant mensuel (fixe) ou montant habituel (variable)', t: 'money' },
       { k: 'estimate', l: 'Si variable : compter ce montant habituel en attendant le montant réel', t: 'chk', help: 'Décoché (prudent) : le revenu variable n’est compté qu’une fois reçu et saisi. Coché : le montant habituel est compté dès le début du mois, puis remplacé par le montant réel.' },
-      { k: 'periodDay', l: 'Période couverte par ce revenu', t: 'select', o: Array.from({ length: 28 }, (_, i) => ({ v: String(i + 1), l: i === 0 ? 'Du 1er à la fin du mois' : `Du ${i + 1} au ${i} du mois suivant` })), help: 'Ex. salaire versé le 25 : « du 25 au 24 ». Revenu facturé le 1er : « du 1er à la fin du mois ». Le montant est réparti sur cette période.' },
-      { k: 'active', l: 'Actif', t: 'chk' }], { ...t, periodDay: String(incDay(t)) },
+      { k: 'periodDay', l: 'Période couverte par ce revenu', t: 'select', o: [{ v: '0', l: 'Glissante : 1 mois à partir de la date saisie' }, ...Array.from({ length: 28 }, (_, i) => ({ v: String(i + 1), l: i === 0 ? 'Du 1er à la fin du mois' : `Du ${i + 1} au ${i} du mois suivant` }))], help: 'Glissante (conseillé pour un revenu facturé) : saisi le 2, il couvre du 2 au 1er du mois suivant (ou jusqu’à la veille de la saisie suivante si elle arrive plus tôt) ; saisi le 10, du 10 au 9. Fixe (ex. salaire versé le 25) : « du 25 au 24 ».' },
+      { k: 'active', l: 'Actif', t: 'chk' }], { ...t, periodDay: isSliding(t) ? '0' : String(incDay(t)) },
       v => { if (!v.name) { toast('Nom requis'); return false; } const n = { ...t, ...v, periodDay: +v.periodDay }; put('incomeTypes', n); syncType('income', n); },
       id ? () => { syncType('income', t, true); remove('incomeTypes', id); } : null);
   },
