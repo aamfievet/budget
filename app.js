@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '2.0.0';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 // Moteur de lecture (Tesseract.js 5.1.1, licence Apache 2.0) hébergé avec l'app, dans le dossier tesseract/
@@ -203,25 +203,37 @@ function viewWeek() {
   else if (cls === 'bad') mood = 'Oups, budget dépassé 😬 On ralentit un peu.';
   else if (cls === 'warn') mood = 'Attention, on lève le pied 🐢';
   else mood = leftRatio > 0.6 ? 'Tout roule, continue comme ça 👌' : 'Sur la bonne voie 🙂';
-  let h = `<header class="hero ${cls}">
-    <div class="hero-top"><button class="round" onclick="A.week(-1)" aria-label="Semaine précédente">‹</button>
-      <div class="wk-pill">Semaine ${w}</div>
-      <button class="round" onclick="A.week(1)" aria-label="Semaine suivante">›</button></div>
-    <div class="hero-dates">du ${fshort(mon)} au ${fshort(sun)}</div>
-    <div class="ring"><svg viewBox="0 0 120 120"><circle class="track" cx="60" cy="60" r="52"/><circle class="prog" cx="60" cy="60" r="52" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${(C * (1 - leftRatio)).toFixed(1)}"/></svg>
-      <div class="ring-txt"><small>Il me reste</small><b class="remain">${fmt(st.remain)}</b><small>sur ${fmt(st.avail)}</small></div></div>
-    <div class="mood">${mood}</div>
-    ${perday ? `<div class="perday">${perday}</div>` : ''}
-    ${!isCur ? `<button class="today-btn" onclick="A.thisWeek()">↩ Revenir à cette semaine</button>` : ''}
+  // Barres « onde » : dépenses de chaque jour de la semaine
+  const days = [...Array(7)].map((_, i) => { const d = addDays(mon, i); return { d, v: spentOn(d), b: dayBudget(d) }; });
+  const ref = Math.max(1, ...days.map(x => x.v), ...days.map(x => x.b));
+  const wave = days.map((x, i) => `<div class="wv ${x.d === t ? 'today' : ''} ${x.v > x.b && x.b >= 0 && x.v > 0 ? 'over' : ''}" title="${fmt(x.v)}"><i style="height:${Math.max(6, Math.round(x.v / ref * 100))}%"></i><span>${'LMMJVSD'[i]}</span></div>`).join('');
+  // Catégories de la semaine (cercles)
+  const wk = S.expenses.filter(e => e.date >= mon && e.date <= sun);
+  const catTot = S.categories.map(c => ({ c, v: wk.filter(e => e.categoryId === c.id).reduce((s, e) => s + e.amount, 0) }));
+  const circles = catTot.map(({ c, v }) => `<button class="cat-circle ${v ? 'has' : ''}" onclick="A.expense(null,'${c.id}')"><span class="cc-ico">${c.icon || '•'}</span><b>${esc(c.name)}</b><small>${v ? fmt(v) : '—'}</small></button>`).join('');
+  let h = `<header class="topbar">
+    <button class="nav-btn" onclick="A.week(-1)" aria-label="Semaine précédente">‹</button>
+    <div class="tb-mid"><div class="wk-title">Semaine ${w}</div><div class="wk-sub">du ${fshort(mon)} au ${fshort(sun)}</div></div>
+    <button class="nav-btn" onclick="A.week(1)" aria-label="Semaine suivante">›</button>
   </header>
+  <section class="hero ${cls}">
+    <div class="hero-row"><span class="hero-label">Reste à dépenser</span>${!isCur ? `<button class="today-btn" onclick="A.thisWeek()">↩ Cette semaine</button>` : ''}</div>
+    <div class="remain">${fmt(st.remain)}</div>
+    <div class="hero-sub">sur ${fmt(st.avail)} disponibles</div>
+    <div class="mood">${mood}</div>
+    <div class="wave">${wave}</div>
+    ${perday ? `<div class="perday">${perday}</div>` : ''}
+  </section>
   ${isCur ? banners() : ''}
   <div class="stats">
-    <div class="stat s1"><span>🎯</span><small>Budget</small><b>${fmt(st.budget)}</b></div>
-    <div class="stat s2"><span>🔁</span><small>Report</small><b>${st.carry > 0 ? '+' : ''}${fmt(st.carry)}</b></div>
-    <div class="stat s3"><span>🧾</span><small>Dépensé</small><b>${fmt(st.spent)}</b></div>
+    <div class="stat"><small>Budget</small><b>${fmt(st.budget)}</b></div>
+    <div class="stat"><small>Report</small><b class="${st.carry < 0 ? 'neg' : st.carry > 0 ? 'pos' : ''}">${st.carry > 0 ? '+' : ''}${fmt(st.carry)}</b></div>
+    <div class="stat"><small>Dépensé</small><b>${fmt(st.spent)}</b></div>
   </div>
-  ${partsTxt ? `<p class="help" style="padding:0 20px">Semaine à cheval sur deux mois : ${partsTxt}</p>` : ''}
-  <div class="section"><h2>Mes dépenses <button onclick="A.expense()">+ Ajouter</button></h2>`;
+  ${partsTxt ? `<p class="help" style="padding:0 22px">Semaine à cheval sur deux mois : ${partsTxt}</p>` : ''}
+  <div class="section"><h2>Par catégorie</h2></div>
+  <div class="circles">${circles}</div>
+  <div class="section"><h2>Mes dépenses</h2>`;
   const exps = S.expenses.filter(e => e.date >= mon && e.date <= sun).sort((a, b) => b.date.localeCompare(a.date) || (b.created || 0) - (a.created || 0));
   if (!exps.length) h += `<div class="list"><div class="empty"><div class="empty-ico">🌱</div>Aucune dépense cette semaine.<br>Touche le bouton <b>+</b> pour en ajouter une.</div></div>`;
   let day = null;
@@ -251,9 +263,9 @@ function viewMonth() {
   const tInc = inc.reduce((s, i) => s + i.amount, 0), tCh = ch.reduce((s, i) => s + i.amount, 0);
   const pend = pendingVariable(ym);
   const before = ym < startYm();
-  let h = `<header class="month-head"><div class="wk-nav"><button onclick="A.month(-1)">‹</button><div><div class="wk-num">${fmonth(ym)}</div><div class="wk-dates">Solde du mois</div></div><button onclick="A.month(1)">›</button></div>
-    <div class="big" style="color:${tInc - tCh < 0 ? 'var(--red)' : 'var(--green)'}">${fmt(tInc - tCh)}</div>
-    <div class="muted" style="font-size:14px">${fmt(tInc)} de revenus − ${fmt(tCh)} de charges</div></header>`;
+  let h = `<header class="topbar"><button class="nav-btn" onclick="A.month(-1)">‹</button><div class="tb-mid"><div class="wk-title cap">${fmonth(ym)}</div><div class="wk-sub">Vue du mois</div></div><button class="nav-btn" onclick="A.month(1)">›</button></header>
+    <section class="hero ${tInc - tCh < 0 ? 'bad' : 'ok'}"><div class="hero-row"><span class="hero-label">Solde du mois</span></div>
+    <div class="remain">${fmt(tInc - tCh)}</div><div class="hero-sub">${fmt(tInc)} de revenus − ${fmt(tCh)} de charges</div></section>`;
   if (before) return h + `<div class="empty">Ce mois est avant la date de début de suivi (${fshort(S.settings.startDate)}).<br>Tu peux la modifier dans Réglages.</div>`;
   h += `<div class="section"><h2>Revenus <button onclick="A.addIncome('${ym}')">+ Ajouter</button></h2><div class="list">`;
   inc.sort((a, b) => a.date.localeCompare(b.date)).forEach(i => h += `<div class="row" onclick="A.editItem('${i.id}')"><span class="ico">💶</span><div class="mid"><div>${esc(i.name)}</div><small>${i.date.slice(0, 7) === ym ? 'compté à partir du ' + fshort(i.date) : 'compté sur tout le mois'}</small></div><div class="amt pos">+${fmt(i.amount)}</div></div>`);
@@ -285,7 +297,7 @@ function viewMonth() {
 
 function viewSettings() {
   const st = S.settings;
-  let h = `<header class="month-head"><div class="wk-num">Réglages</div></header>`;
+  let h = `<header class="topbar"><div class="tb-mid"><div class="wk-title">Réglages</div><div class="wk-sub">Revenus, charges, catégories et sauvegarde</div></div></header>`;
   h += `<div class="section"><h2>Types de revenus <button onclick="A.incomeType()">+ Ajouter</button></h2><div class="list">`;
   S.incomeTypes.forEach(t => h += `<div class="row" onclick="A.incomeType('${t.id}')"><span class="ico">💶</span><div class="mid"><div>${esc(t.name)}${t.active ? '' : ' (inactif)'}</div><small>${t.variable ? 'Montant variable, saisi chaque mois' : 'Fixe, chaque mois'}</small></div><div class="amt">${t.variable ? '—' : fmt(t.amount)}</div></div>`);
   h += `</div></div><div class="section"><h2>Charges fixes <button onclick="A.chargeType()">+ Ajouter</button></h2><div class="list">`;
@@ -298,7 +310,7 @@ function viewSettings() {
   h += `</div></div>`;
   h += `<div class="section"><h2>Options</h2><div class="list" style="padding:4px 14px">
     <label class="chk"><input type="checkbox" ${st.carryOver ? 'checked' : ''} onchange="A.setCarry(this.checked)"> Reporter le reste (ou le dépassement) sur la semaine suivante</label>
-    <label class="f"><span>Thème de l’affichage</span><select onchange="A.setTheme(this.value)">${[['auto','Automatique (comme le téléphone)'],['light','☀️ Clair'],['dark','🌙 Sombre']].map(([v,l])=>`<option value="${v}" ${(st.theme||'auto')===v?'selected':''}>${l}</option>`).join('')}</select></label>
+    <label class="f"><span>Thème de l’affichage</span><select onchange="A.setTheme(this.value)">${[['dark','🌙 Sombre (recommandé)'],['light','☀️ Clair'],['auto','Automatique (comme le téléphone)']].map(([v,l])=>`<option value="${v}" ${(st.theme||'dark')===v?'selected':''}>${l}</option>`).join('')}</select></label>
     <label class="f"><span>Début du suivi (le budget est calculé à partir de cette date)</span><input type="date" value="${st.startDate}" onchange="A.setStart(this.value)"></label></div></div>`;
   h += `<div class="section"><h2>Sauvegarde Google Drive</h2><div class="list" style="padding:4px 14px 14px">
     <label class="f"><span>Identifiant client Google (voir le guide d’installation)</span><input id="cid" value="${esc(clientId())}" placeholder="xxxxxxxx.apps.googleusercontent.com"></label><button class="btn ghost block" onclick="A.setClientId($('#cid').value)">Enregistrer l’identifiant</button>${(window.BUDGET_CONFIG || {}).googleClientId ? '<p class="help">✅ Identifiant intégré à l’application (fichier config.js).</p>' : ''}
@@ -632,9 +644,9 @@ function loadThumbs() { document.querySelectorAll('img[data-photo]').forEach(asy
 
 /* ---------- Saisie d'une dépense ---------- */
 let draft = null;
-function expenseSheet(id) {
+function expenseSheet(id, catId) {
   const e = id ? S.expenses.find(x => x.id === id) : null;
-  draft = e ? { ...e, newBlob: null } : { id: null, date: today(), amount: '', categoryId: (S.categories[0] || {}).id, note: '', photoId: null, newBlob: null };
+  draft = e ? { ...e, newBlob: null } : { id: null, date: today(), amount: '', categoryId: catId || (S.categories[0] || {}).id, note: '', photoId: null, newBlob: null };
   const chips = S.categories.map(c => `<button type="button" class="chip ${c.id === draft.categoryId ? 'on' : ''}" data-cat="${c.id}">${c.icon} ${esc(c.name)}</button>`).join('');
   sheet(`<h3>${e ? 'Modifier la dépense' : 'Nouvelle dépense'}</h3>
     <div class="photo-zone">
@@ -767,7 +779,7 @@ const A = {
   thisWeek() { ui.week = mondayOf(today()); render(); },
   openWeek(m) { ui.week = m; go('week'); },
   month(n) { ui.month = addMonths(ui.month, n); render(); },
-  expense(id) { expenseSheet(id); },
+  expense(id, catId) { expenseSheet(id, catId); },
   addIncome(ym, typeId) {
     const types = S.incomeTypes.filter(t => t.active); if (!types.length) { toast('Ajoute d’abord un type de revenu dans Réglages'); return; }
     const t0 = types.find(t => t.id === typeId) || types[0];
@@ -872,8 +884,10 @@ window.A = A; window.go = go; window.closeSheet = closeSheet;
 
 /* ---------- Thème ---------- */
 function applyTheme() {
-  const t = (S.settings && S.settings.theme) || 'auto';
-  if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.dataset.theme = t;
+  let t = (S.settings && S.settings.theme) || 'dark';
+  if (t === 'auto') t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  document.documentElement.dataset.theme = t;
+  const m = document.querySelector('meta[name=theme-color]'); if (m) m.content = t === 'light' ? '#f5f3fc' : '#140f2e';
 }
 
 /* ---------- Démarrage ---------- */
