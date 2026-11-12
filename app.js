@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
@@ -358,11 +358,43 @@ async function compress(img) {
 }
 let tessLoading;
 function loadScript(src) { return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('Chargement impossible : ' + src)); document.head.appendChild(s); }); }
-async function ocr(img, onProgress) {
+/* Lecture du ticket. Passe 1 : mise en page automatique. Si le montant ou la date manquent,
+   passe 2 en « bloc unique » (lit mieux certaines lignes) et on complète les trous. */
+async function ocrReceipt(img, anchor, onProgress) {
   if (!window.Tesseract) { tessLoading = tessLoading || loadScript(TESSERACT_URL); await tessLoading; }
-  const worker = await Tesseract.createWorker('fra', 1, { logger: m => m.status === 'recognizing text' && onProgress && onProgress(Math.round(m.progress * 100)) });
-  try { const { data } = await worker.recognize(drawScaled(img, 1800, true)); return data.text || ''; }
-  finally { worker.terminate(); }
+  let pass = 1;
+  const worker = await Tesseract.createWorker('fra', 1, { logger: m => m.status === 'recognizing text' && onProgress && onProgress(pass, Math.round(m.progress * 100)) });
+  try {
+    const canvas = drawScaled(img, 1800, true);
+    await worker.setParameters({ tessedit_pageseg_mode: '3' });
+    const t1 = (await worker.recognize(canvas)).data.text || '';
+    const r = parseReceipt(t1, anchor); let text = t1;
+    if (!r.amount || !r.date || !r.store) {
+      pass = 2; await worker.setParameters({ tessedit_pageseg_mode: '6' });
+      const t2 = (await worker.recognize(canvas)).data.text || '';
+      const r2 = parseReceipt(t2, anchor);
+      ['amount', 'date', 'store'].forEach(k => { if (!r[k] && r2[k]) r[k] = r2[k]; });
+      if (!r.categoryId && r2.categoryId) r.categoryId = r2.categoryId;
+      text = t1 + '\n—— 2e lecture ——\n' + t2;
+    }
+    r.rawStore = r.store; applyAliases(r);
+    return { r, text };
+  } finally { worker.terminate(); }
+}
+/* Mémoire des corrections : si tu corriges le nom ou la catégorie trouvés, l'app s'en souvient pour la prochaine fois */
+function applyAliases(r) {
+  if (!r.store) return;
+  const a = (S.settings.aliases || []).find(x => fuzzyMatch(r.store, x.ocr) || fuzzyMatch(r.store, x.name) || compact(r.store) === compact(x.ocr));
+  if (a) { r.store = a.name; if (a.categoryId && S.categories.some(c => c.id === a.categoryId)) r.categoryId = a.categoryId; }
+}
+function learnAlias(ocrStore, name, categoryId) {
+  if (!ocrStore || !name || compact(name).length < 3) return;
+  const list = S.settings.aliases = S.settings.aliases || [];
+  const i = list.findIndex(x => compact(x.ocr) === compact(ocrStore) || compact(x.name) === compact(name));
+  const item = { ocr: ocrStore, name, categoryId };
+  if (i >= 0) list[i] = item; else list.push(item);
+  if (list.length > 200) list.shift();
+  saveSettings();
 }
 /* Extraction montant / date / magasin / catégorie depuis le texte du ticket */
 function parseNumbers(line) {
@@ -372,7 +404,7 @@ function parseNumbers(line) {
     const s = m[0]; let n;
     if (/^\d{1,3}([ . ]\d{3})+$/.test(s)) n = parseInt(s.replace(/[ . ]/g, ''), 10);
     else n = Math.round(parseFloat(s.replace(',', '.')));
-    if (n > 0 && n < 5000000) out.push(n);
+    if (n > 0 && n < 1000000) out.push(n); // au-delà d'un million : numéro (carte, contrat), pas un montant
   }
   return out;
 }
@@ -532,7 +564,52 @@ function parseReceipt(text, anchor) {
   if (st) cat = S.categories.find(c => kw(c).some(k => compact(st.name).includes(compact(k)) || (st.known && compact(st.known).includes(compact(k)))));
   if (!cat) cat = S.categories.find(c => kw(c).some(k => k.toLowerCase() !== 'total' && (k.length >= 4 ? lines.some(l => fuzzyIn(l, k) >= 0) : text.toLowerCase().includes(k.toLowerCase()))));
   if (cat) res.categoryId = cat.id;
+  if (isCardSlip(lines)) Object.assign(res, parseCardSlip(lines, anchor, res));
   return res;
+}
+/* ---------- Ticket de carte bancaire (« ticket client ») ----------
+   Modèle : CB / LE jj/mm/aa A hh:mm:ss / NOM DU COMMERÇANT / numéros… / MONTANT : / 4250 XPF / DEBIT / TICKET CLIENT */
+function isCardSlip(lines) {
+  const t = lines.join('\n');
+  return (lines.some(l => /^\W*c\s*b\b/i.test(l) && !/\d/.test(l) && l.split(/\s+/).length <= 3) && /mont\s*a\s*n\s*t|xpf|d[ée]bit|conserver/i.test(t)) || (/ticket\s*client|a\s*conserver/i.test(t) && /mont\s*a\s*n\s*t/i.test(t) && /d[ée]bit|cr[ée]dit/i.test(t));
+}
+function parseCardSlip(lines, anchor, generic) {
+  const out = {};
+  // Montant : le nombre suivi de XPF (en bas à droite, en gras), sinon la ligne sous « MONTANT : »
+  const xpf = lines.map(l => l.match(/(\d{1,3}(?:[ . ]\d{3})+|\d+)\s*X\s*P\s*F/i)).filter(Boolean);
+  if (xpf.length) out.amount = parseInt(xpf[xpf.length - 1][1].replace(/\D/g, ''), 10);
+  else {
+    const i = lines.findIndex(l => /mont\s*a\s*n\s*t/i.test(l));
+    const n = i >= 0 ? parseNumbers(lines.slice(i, i + 2).join(' ')).filter(x => x >= 10) : [];
+    out.amount = n.length ? n[0] : undefined; // pas de montant lisible : on laisse vide plutôt que de prendre un numéro de carte
+  }
+  // Date : la ligne qui commence par « LE » (juste après la ligne « CB »), suivie de « A hh:mm:ss »
+  let li = lines.findIndex(l => /^\W*[LH1I|][E3]\s/i.test(l) && /\d/.test(l));
+  if (li < 0) li = lines.findIndex(l => /\d\S{0,3}[\/#%]\S{1,6}\s+[AÀ]\s+\d{1,2}/.test(l));
+  if (li >= 0) {
+    const part = lines[li].replace(/^\W*\S{1,2}\s+(?=\S*\d)/, '').replace(/^\D{1,2}(?=\d)/, '').split(/\s+[AÀà]\s+|\s+\d{1,2}:\d{2}/)[0];
+    const d = findDate(part, anchor);
+    out.date = d || null; // illisible : l'app mettra le jour de la photo
+    // Commerçant : la ligne juste après la ligne de date
+    let words = (lines[li + 1] || '').split(/\s+/).filter(w => /^[\p{L}'&.-]+$/u.test(w));
+    while (words.length && words[0].length <= 2 && !/^dr\.?$/i.test(words[0])) words.shift();   // débris en début de ligne
+    while (words.length && words[words.length - 1].replace(/\./g, '').length <= 2) words.pop(); // débris en fin de ligne
+    const name = words.join(' ');
+    if (name && /\p{L}{3,}/u.test(name)) {
+      const known = SHOPS.concat(S.categories.flatMap(c => (c.keywords || '').split(',').map(k => k.trim()).filter(k => k.length >= 4))).find(n => fuzzyMatch(name, n));
+      out.store = (known ? known.replace(/(^|\s)\p{L}/gu, c => c.toUpperCase()) : name.toLowerCase().replace(/(^|\s)\p{L}/gu, c => c.toUpperCase())).slice(0, 30);
+    } else out.store = null;
+  }
+  if (out.date === null) delete out.date;
+  if (out.store === null) { delete out.store; if (generic.store && /^(nfc|proxi|cb)/i.test(generic.store)) out.store = undefined; }
+  // Catégorie d'après le commerçant (docteur / pharmacie → Santé, sinon mots-clés)
+  if (out.store) {
+    const kw = c => (c.keywords || '').split(',').map(k => k.trim()).filter(k => k.length >= 4);
+    let cat = /^(dr|docteur|pharmacie|cabinet|laboratoire|kin[ée])\b/i.test(out.store) ? S.categories.find(c => /sant[ée]/i.test(c.name)) : null;
+    cat = cat || S.categories.find(c => kw(c).some(k => fuzzyMatch(out.store, k)));
+    out.categoryId = cat ? cat.id : undefined;
+  } else out.categoryId = undefined;
+  return out;
 }
 const photoUrls = new Map();
 async function photoUrl(id) {
@@ -572,6 +649,7 @@ function expenseSheet(id) {
     ev.preventDefault();
     const amount = toInt(f.amount.value); if (amount <= 0) { toast('Indique un montant'); return; }
     const exp = { id: draft.id || uid(), date: f.date.value || today(), amount, categoryId: draft.categoryId, note: f.note.value.trim(), photoId: draft.photoId, created: draft.created || Date.now() };
+    if (draft.ocrStore && exp.note) learnAlias(draft.ocrStore, exp.note, exp.categoryId);
     if (draft.newBlob) {
       if (draft.oldPhotoId) await dbDel('photos', draft.oldPhotoId);
       exp.photoId = uid(); await dbPut('photos', { id: exp.photoId, blob: draft.newBlob, driveId: null });
@@ -594,10 +672,11 @@ async function handlePhoto(file) {
     const p = $('#ph-prev'); p.src = URL.createObjectURL(blob); p.classList.remove('hidden');
     o.textContent = `Photo optimisée : ${Math.round(file.size / 1024)} Ko → ${Math.round(blob.size / 1024)} Ko. Lecture du ticket…`;
     const kb = Math.round(blob.size / 1024);
-    const text = await ocr(img, pc => { if ($('#ocr')) $('#ocr').textContent = `Photo : ${kb} Ko. Lecture du ticket… ${pc} %`; });
     const lm = file.lastModified ? new Date(file.lastModified) : new Date();
     const shot = lm.getFullYear() + '-' + pad(lm.getMonth() + 1) + '-' + pad(lm.getDate()); // jour de la photo
-    const r = parseReceipt(text, shot); const f = $('#ef'); if (!f) return;
+    const { r, text } = await ocrReceipt(img, shot, (ps, pc) => { if ($('#ocr')) $('#ocr').textContent = `Photo : ${kb} Ko. Lecture du ticket${ps > 1 ? ' (2e passage)' : ''}… ${pc} %`; });
+    const f = $('#ef'); if (!f) return;
+    draft.ocrStore = r.rawStore || r.store || null;
     const found = [];
     if (r.amount) { f.amount.value = r.amount; found.push('montant ' + fmt(r.amount)); }
     if (r.date) { f.date.value = r.date; found.push('date ' + fshort(r.date)); }
