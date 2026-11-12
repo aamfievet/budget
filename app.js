@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.3.0';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 // Moteur de lecture (Tesseract.js 5.1.1, licence Apache 2.0) hébergé avec l'app, dans le dossier tesseract/
@@ -91,12 +91,21 @@ function invalidate() { cache = { daily: new Map(), spentByDay: null }; }
    Avec un jour de début J (ex. 25), le mois budgétaire « novembre » va du 25 octobre au 24 novembre.
    J = 1 : mois civil classique. */
 const cycleDay = () => Math.min(28, Math.max(1, +((S.settings && S.settings.cycleDay) || 1)));
-const cycleStart = ym => cycleDay() === 1 ? ym + '-01' : addMonths(ym, -1) + '-' + pad(cycleDay());
-const cycleEnd = ym => addDays(cycleStart(addMonths(ym, 1)), -1);
-const cycleLen = ym => Math.round((parseD(cycleEnd(ym)) - parseD(cycleStart(ym))) / 864e5) + 1;
-const cycleOf = s => cycleDay() === 1 ? s.slice(0, 7) : (parseD(s).getUTCDate() >= cycleDay() ? addMonths(s.slice(0, 7), 1) : s.slice(0, 7));
-const dayIdx = (s, ym) => Math.round((parseD(s) - parseD(cycleStart(ym))) / 864e5);
+/* Période générique commençant le jour p : clé « ym » = du p du mois précédent au p-1 du mois ym (p = 1 : mois civil) */
+const pStart = (ym, p) => p === 1 ? ym + '-01' : addMonths(ym, -1) + '-' + pad(p);
+const pEnd = (ym, p) => addDays(pStart(addMonths(ym, 1), p), -1);
+const pLen = (ym, p) => Math.round((parseD(pEnd(ym, p)) - parseD(pStart(ym, p))) / 864e5) + 1;
+const pOf = (s, p) => p === 1 ? s.slice(0, 7) : (parseD(s).getUTCDate() >= p ? addMonths(s.slice(0, 7), 1) : s.slice(0, 7));
+const pIdx = (s, ym, p) => Math.round((parseD(s) - parseD(pStart(ym, p))) / 864e5);
+const cycleStart = ym => pStart(ym, cycleDay());
+const cycleEnd = ym => pEnd(ym, cycleDay());
+const cycleLen = ym => pLen(ym, cycleDay());
+const cycleOf = s => pOf(s, cycleDay());
+const dayIdx = (s, ym) => pIdx(s, ym, cycleDay());
 const inCycle = (s, ym) => !!s && s >= cycleStart(ym) && s <= cycleEnd(ym);
+/* Chaque revenu a sa propre période (ex. salaire du 25 au 24, revenu complémentaire du 1er au 30/31) */
+const incDay = t => Math.min(28, Math.max(1, +((t && t.periodDay) || cycleDay())));
+const incTypeOf = id => S.incomeTypes.find(t => t.id === id) || { id, name: 'Revenu', variable: false, periodDay: cycleDay(), active: false };
 const cycleLabel = ym => cycleDay() === 1 ? '' : `du ${fshort(cycleStart(ym))} au ${fshort(cycleEnd(ym))}`;
 const curYm = () => cycleOf(today());
 const startYm = () => cycleOf(S.settings.startDate);
@@ -106,13 +115,31 @@ function ensureMonth(ym) {
   if (ym < startYm()) return false;
   if (S.settings.months[ym]) return true;
   S.settings.months[ym] = true;
-  S.incomeTypes.filter(t => t.active && !t.variable && t.amount > 0).forEach(t => put('monthItems', { id: uid(), month: ym, kind: 'income', typeId: t.id, name: t.name, amount: t.amount, date: cycleStart(ym), auto: true }));
   S.chargeTypes.filter(t => t.active && t.amount > 0).forEach(t => put('monthItems', { id: uid(), month: ym, kind: 'charge', typeId: t.id, name: t.name, amount: t.amount, date: cycleStart(ym), auto: true }));
   saveSettings();
   return true;
 }
+/* Revenu fixe : crée sa ligne pour sa période K, une seule fois */
+function ensureIncome(t, K) {
+  if (!t.active || t.variable || !(t.amount > 0)) return;
+  const p = incDay(t); if (K < pOf(S.settings.startDate, p)) return;
+  const flags = S.settings.incMonths = S.settings.incMonths || {}; const key = t.id + '|' + K;
+  if (flags[key] === true || (flags[key] === undefined && p === cycleDay() && S.settings.months[K])) return; // déjà fait (y compris ancienne version)
+  flags[key] = true;
+  if (!S.monthItems.some(i => i.kind === 'income' && i.typeId === t.id && i.month === K)) put('monthItems', { id: uid(), month: K, kind: 'income', typeId: t.id, name: t.name, amount: t.amount, date: pStart(K, p), auto: true });
+  saveSettings();
+}
 /* Quand on modifie un type, on répercute sur le mois en cours et les suivants (lignes automatiques seulement) */
 function syncType(kind, t, deleted) {
+  if (kind === 'income') {
+    const p = incDay(t), K0 = pOf(today(), p);
+    S.monthItems.filter(i => i.kind === 'income' && i.typeId === t.id && i.month >= K0).forEach(i => {
+      if (i.auto) remove('monthItems', i.id); else if (!deleted && i.name !== t.name) put('monthItems', { ...i, name: t.name });
+    });
+    const flags = S.settings.incMonths = S.settings.incMonths || {};
+    for (let k = 0, K = K0; k < 36; k++, K = addMonths(K, 1)) flags[t.id + '|' + K] = false; // à recréer avec le nouveau montant
+    saveSettings(); return;
+  }
   const cur = curYm();
   Object.keys(S.settings.months).filter(ym => ym >= cur).forEach(ym => {
     const items = S.monthItems.filter(i => i.month === ym && i.typeId === t.id);
@@ -131,23 +158,38 @@ function spread(arr, amount, from) {
   const n = arr.length - from; const base = Math.trunc(amount / n); let r = amount - base * n;
   for (let i = 0; i < n; i++) { let v = base; if (r > 0) { v++; r--; } else if (r < 0) { v--; r++; } arr[from + i] += v; }
 }
-/* Budget par jour d'un mois : charges réparties sur tout le mois, chaque revenu à partir de sa date de réception */
-function monthDaily(ym) {
-  if (cache.daily.has(ym)) return cache.daily.get(ym);
-  const arr = new Array(cycleLen(ym)).fill(0);
-  if (ensureMonth(ym)) {
-    const byStart = {}; // montants nets regroupés par jour de départ (évite les écarts d'arrondi)
-    S.monthItems.filter(i => i.month === ym).forEach(i => {
-      const from = i.kind === 'charge' || i.auto || (i.date === ym + '-01' && !(S.incomeTypes.find(t => t.id === i.typeId) || {}).variable) ? 0 : inCycle(i.date, ym) ? dayIdx(i.date, ym) : (i.date > cycleEnd(ym) ? cycleLen(ym) - 1 : 0);
-      byStart[from] = (byStart[from] || 0) + (i.kind === 'charge' ? -i.amount : i.amount);
-    });
-    estimatesFor(ym).forEach(t => { byStart[0] = (byStart[0] || 0) + t.amount; }); // revenus variables comptés en estimation
-    Object.entries(byStart).forEach(([from, amt]) => spread(arr, amt, +from));
-  }
-  cache.daily.set(ym, arr);
-  return arr;
+/* Lignes de revenu d'un type pour sa période K (+ estimation si revenu variable pas encore saisi) */
+function incomeEntries(t, K) {
+  ensureIncome(t, K);
+  const items = S.monthItems.filter(i => i.kind === 'income' && i.typeId === t.id && i.month === K);
+  if (!items.length && t.active && t.variable && t.estimate && t.amount > 0 && K >= pOf(S.settings.startDate, incDay(t))) return [{ estimate: true, amount: t.amount, date: pStart(K, incDay(t)), auto: true }];
+  return items;
 }
-const dayBudget = s => { if (s < S.settings.startDate) return 0; const ym = cycleOf(s); return monthDaily(ym)[dayIdx(s, ym)]; };
+const entryFrom = (i, K, p) => i.auto || (i.date === K + '-01' && !incTypeOf(i.typeId).variable) ? 0 : (i.date >= pStart(K, p) && i.date <= pEnd(K, p)) ? pIdx(i.date, K, p) : (i.date > pEnd(K, p) ? pLen(K, p) - 1 : 0);
+/* Revenus par jour d'une période d'un type de revenu */
+function incomeDaily(t, K) {
+  const ck = 'i|' + t.id + '|' + K; if (cache.daily.has(ck)) return cache.daily.get(ck);
+  const p = incDay(t), arr = new Array(pLen(K, p)).fill(0), byStart = {};
+  incomeEntries(t, K).forEach(i => { const f = entryFrom(i, K, p); byStart[f] = (byStart[f] || 0) + i.amount; });
+  Object.entries(byStart).forEach(([f, a]) => spread(arr, a, +f));
+  cache.daily.set(ck, arr); return arr;
+}
+/* Charges par jour d'un mois budgétaire */
+function chargeDaily(ym) {
+  const ck = 'c|' + ym; if (cache.daily.has(ck)) return cache.daily.get(ck);
+  const arr = new Array(cycleLen(ym)).fill(0);
+  if (ensureMonth(ym)) { const tot = S.monthItems.filter(i => i.month === ym && i.kind === 'charge').reduce((s, i) => s + i.amount, 0); if (tot) spread(arr, -tot, 0); }
+  cache.daily.set(ck, arr); return arr;
+}
+/* Tous les types de revenu, y compris ceux supprimés qui ont encore des lignes */
+function incomeTypesAll() {
+  const list = [...S.incomeTypes];
+  S.monthItems.forEach(i => { if (i.kind === 'income' && !list.some(t => t.id === i.typeId)) list.push(incTypeOf(i.typeId)); });
+  return list;
+}
+function incomeOn(s) { return incomeTypesAll().reduce((sum, t) => { const p = incDay(t), K = pOf(s, p); return sum + incomeDaily(t, K)[pIdx(s, K, p)]; }, 0); }
+const dayBudget = s => { if (s < S.settings.startDate) return 0; const ym = cycleOf(s); return incomeOn(s) + chargeDaily(ym)[dayIdx(s, ym)]; };
+function monthDaily(ym) { const a = []; for (let d = cycleStart(ym); d <= cycleEnd(ym); d = addDays(d, 1)) a.push(dayBudget(d)); return a; }
 function spentOn(s) {
   if (!cache.spentByDay) { cache.spentByDay = new Map(); S.expenses.forEach(e => cache.spentByDay.set(e.date, (cache.spentByDay.get(e.date) || 0) + e.amount)); }
   return cache.spentByDay.get(s) || 0;
@@ -203,13 +245,14 @@ function banners() {
   return h;
 }
 /* Revenus variables pas encore saisis ce mois-ci, mais dont l'estimation doit être comptée */
+const incKeyFor = (t, ym) => pOf(ym === curYm() ? today() : cycleEnd(ym), incDay(t)); // période du revenu à saisir pour ce mois budgétaire
 function estimatesFor(ym) {
   if (ym < startYm()) return [];
-  return S.incomeTypes.filter(t => t.active && t.variable && t.estimate && t.amount > 0 && !S.monthItems.some(i => i.month === ym && i.typeId === t.id));
+  return S.incomeTypes.filter(t => t.active && t.variable && t.estimate && t.amount > 0 && !S.monthItems.some(i => i.kind === 'income' && i.month === incKeyFor(t, ym) && i.typeId === t.id));
 }
 function pendingVariable(ym) {
   if (ym < startYm()) return [];
-  return S.incomeTypes.filter(t => t.active && t.variable && !S.monthItems.some(i => i.month === ym && i.typeId === t.id));
+  return S.incomeTypes.filter(t => t.active && t.variable && !S.monthItems.some(i => i.kind === 'income' && i.month === incKeyFor(t, ym) && i.typeId === t.id));
 }
 
 function viewWeek() {
@@ -284,18 +327,29 @@ function expRow(e) {
 
 function viewMonth() {
   const ym = ui.month; ensureMonth(ym);
-  const items = S.monthItems.filter(i => i.month === ym);
-  const inc = items.filter(i => i.kind === 'income'), ch = items.filter(i => i.kind === 'charge');
-  const est = estimatesFor(ym), tInc = inc.reduce((s, i) => s + i.amount, 0) + est.reduce((s, t) => s + t.amount, 0), tCh = ch.reduce((s, i) => s + i.amount, 0);
+  const ch = S.monthItems.filter(i => i.month === ym && i.kind === 'charge');
+  // Revenus : chaque ligne avec la part qui tombe dans ce mois budgétaire
+  const c0 = cycleStart(ym), c1 = cycleEnd(ym), inc = [];
+  let tInc = 0;
+  for (let d = c0; d <= c1; d = addDays(d, 1)) tInc += incomeOn(d); // vue complète du mois, même avant le début du suivi
+  incomeTypesAll().forEach(t => {
+    const p = incDay(t), keys = [...new Set([pOf(c0, p), pOf(c1, p)])];
+    keys.forEach(K => incomeEntries(t, K).forEach(e => {
+      const arr = new Array(pLen(K, p)).fill(0); spread(arr, e.amount, entryFrom(e, K, p));
+      let part = 0; for (let d = pStart(K, p), j = 0; d <= pEnd(K, p); d = addDays(d, 1), j++) if (d >= c0 && d <= c1) part += arr[j];
+      if (part) inc.push({ ...e, typeId: t.id, name: e.name || t.name, K, p, part, from: addDays(pStart(K, p), entryFrom(e, K, p)), to: pEnd(K, p) });
+    }));
+  });
+  const est = estimatesFor(ym), tCh = ch.reduce((s, i) => s + i.amount, 0);
   const pend = pendingVariable(ym);
   const before = ym < startYm();
   let h = `<header class="topbar"><button class="nav-btn" onclick="A.month(-1)">‹</button><div class="tb-mid"><div class="wk-title cap">${fmonth(ym)}</div><div class="wk-sub">${cycleDay() === 1 ? 'Vue du mois' : 'Mois budgétaire ' + cycleLabel(ym)}</div></div><button class="nav-btn" onclick="A.month(1)">›</button></header>
     <section class="hero ${tInc - tCh < 0 ? 'bad' : 'ok'}"><div class="hero-row"><span class="hero-label">Solde du mois</span></div>
-    <div class="remain">${fmt(tInc - tCh)}</div><div class="hero-sub">${fmt(tInc)} de revenus − ${fmt(tCh)} de charges</div></section>`;
+    <div class="remain">${fmt(tInc - tCh)}</div><div class="hero-sub">${fmt(tInc)} de revenus sur la période − ${fmt(tCh)} de charges</div></section>`;
   if (before) return h + `<div class="empty">Ce mois est avant la date de début de suivi (${fshort(S.settings.startDate)}).<br>Tu peux la modifier dans Réglages.</div>`;
   h += `<div class="section"><h2>Revenus <button onclick="A.addIncome('${ym}')">+ Ajouter</button></h2><div class="list">`;
-  inc.sort((a, b) => a.date.localeCompare(b.date)).forEach(i => h += `<div class="row" onclick="A.editItem('${i.id}')"><span class="ico">💶</span><div class="mid"><div>${esc(i.name)}</div><small>${!i.auto && !(i.date === ym + '-01' && !(S.incomeTypes.find(t => t.id === i.typeId) || {}).variable) && inCycle(i.date, ym) && i.date !== cycleStart(ym) ? 'compté à partir du ' + fshort(i.date) : 'compté sur tout le mois'}</small></div><div class="amt pos">+${fmt(i.amount)}</div></div>`);
-  pend.forEach(t => { const e = est.includes(t); h += `<div class="row" onclick="A.addIncome('${ym}','${t.id}')"><span class="ico">⏳</span><div class="mid"><div>${esc(t.name)}</div><small class="pending">${e ? 'Estimation comptée — touche pour saisir le montant réel' : 'En attente — touche pour saisir le montant reçu'}</small></div><div class="amt ${e ? 'pos' : ''}">${e ? '≈ +' + fmt(t.amount) : '—'}</div></div>`; });
+  inc.sort((a, b) => a.from.localeCompare(b.from)).forEach(i => h += `<div class="row" ${i.id ? `onclick="A.editItem('${i.id}')"` : `onclick="A.addIncome('${ym}','${i.typeId}')"`}><span class="ico">${i.estimate ? '⏳' : '💶'}</span><div class="mid"><div>${esc(i.name)}${i.estimate ? ' (estimation)' : ''}</div><small>du ${fshort(i.from)} au ${fshort(i.to)}${i.part !== i.amount ? ` · ${fmt(i.part)} sur ce mois` : ''}</small></div><div class="amt pos">+${fmt(i.amount)}</div></div>`);
+  pend.filter(t => !est.includes(t)).forEach(t => { h += `<div class="row" onclick="A.addIncome('${ym}','${t.id}')"><span class="ico">⏳</span><div class="mid"><div>${esc(t.name)}</div><small class="pending">En attente — touche pour saisir le montant</small></div><div class="amt">—</div></div>`; });
   if (!inc.length && !pend.length) h += `<div class="empty">Aucun revenu. Ajoute tes types de revenus dans Réglages.</div>`;
   h += `</div></div><div class="section"><h2>Charges fixes <button onclick="A.addCharge('${ym}')">+ Ajouter</button></h2><div class="list">`;
   ch.sort((a, b) => b.amount - a.amount).forEach(i => h += `<div class="row" onclick="A.editItem('${i.id}')"><span class="ico" style="--h:20">📄</span><div class="mid"><div>${esc(i.name)}</div></div><div class="amt neg">−${fmt(i.amount)}</div></div>`);
@@ -325,7 +379,7 @@ function viewSettings() {
   const st = S.settings;
   let h = `<header class="topbar"><button class="nav-btn" onclick="go('week')" aria-label="Retour à l’accueil">‹</button><div class="tb-mid"><div class="wk-title">Réglages</div><div class="wk-sub">Revenus, charges, catégories et sauvegarde</div></div><span class="nav-spacer"></span></header>`;
   h += `<div class="section"><h2>Types de revenus <button onclick="A.incomeType()">+ Ajouter</button></h2><div class="list">`;
-  S.incomeTypes.forEach(t => h += `<div class="row" onclick="A.incomeType('${t.id}')"><span class="ico">💶</span><div class="mid"><div>${esc(t.name)}${t.active ? '' : ' (inactif)'}</div><small>${t.variable ? (t.estimate ? 'Variable · estimation comptée en attendant' : 'Variable · compté à réception') : 'Fixe, chaque mois'}</small></div><div class="amt">${t.variable ? (t.amount ? '≈ ' + fmt(t.amount) : '—') : fmt(t.amount)}</div></div>`);
+  S.incomeTypes.forEach(t => h += `<div class="row" onclick="A.incomeType('${t.id}')"><span class="ico">💶</span><div class="mid"><div>${esc(t.name)}${t.active ? '' : ' (inactif)'}</div><small>${t.variable ? (t.estimate ? 'Variable · estimation comptée' : 'Variable · compté à réception') : 'Fixe'} · ${incDay(t) === 1 ? 'du 1er à la fin du mois' : 'du ' + incDay(t) + ' au ' + (incDay(t) - 1)}</small></div><div class="amt">${t.variable ? (t.amount ? '≈ ' + fmt(t.amount) : '—') : fmt(t.amount)}</div></div>`);
   h += `</div></div><div class="section"><h2>Charges fixes <button onclick="A.chargeType()">+ Ajouter</button></h2><div class="list">`;
   S.chargeTypes.forEach(t => h += `<div class="row" onclick="A.chargeType('${t.id}')"><span class="ico" style="--h:20">📄</span><div class="mid"><div>${esc(t.name)}${t.active ? '' : ' (inactif)'}</div></div><div class="amt">${fmt(t.amount)}</div></div>`);
   const tI = S.incomeTypes.filter(t => t.active && !t.variable).reduce((s, t) => s + t.amount, 0), tC = S.chargeTypes.filter(t => t.active).reduce((s, t) => s + t.amount, 0);
@@ -813,13 +867,13 @@ const A = {
   addIncome(ym, typeId) {
     const types = S.incomeTypes.filter(t => t.active); if (!types.length) { toast('Ajoute d’abord un type de revenu dans Réglages'); return; }
     const t0 = types.find(t => t.id === typeId) || types[0];
-    const d = ym === curYm() ? today() : cycleStart(ym);
+    const d = ym === curYm() ? today() : pStart(incKeyFor(t0, ym), incDay(t0));
     form('Revenu reçu — ' + fmonth(ym), [
       { k: 'typeId', l: 'Type de revenu', t: 'select', o: types.map(t => ({ v: t.id, l: t.name })) },
       { k: 'amount', l: 'Montant reçu (F CFP)', t: 'money' },
-      { k: 'date', l: 'Compté à partir du', t: 'date', help: 'Le montant est réparti sur les jours restants du mois budgétaire à partir de cette date. Tu peux mettre la date de facturation si le montant est déjà connu, même si le virement arrive plus tard.' }],
-      { typeId: t0.id, amount: t0.variable ? (t0.amount || '') : t0.amount, date: t0.variable ? d : cycleStart(ym) },
-      v => { if (v.amount <= 0) { toast('Indique un montant'); return false; } const t = S.incomeTypes.find(x => x.id === v.typeId); put('monthItems', { id: uid(), month: ym, kind: 'income', typeId: v.typeId, name: t.name, amount: v.amount, date: v.date || cycleStart(ym), auto: false }); toast('Revenu ajouté, semaines recalculées'); });
+      { k: 'date', l: 'Compté à partir du', t: 'date', help: 'Le montant est réparti à partir de cette date jusqu’à la fin de la période de ce revenu (réglée dans Réglages). Tu peux mettre la date de facturation si le montant est déjà connu, même si le virement arrive plus tard.' }],
+      { typeId: t0.id, amount: t0.variable ? (t0.amount || '') : t0.amount, date: t0.variable ? d : pStart(incKeyFor(t0, ym), incDay(t0)) },
+      v => { if (v.amount <= 0) { toast('Indique un montant'); return false; } const t = S.incomeTypes.find(x => x.id === v.typeId); const dt = v.date || today(); put('monthItems', { id: uid(), month: pOf(dt, incDay(t)), kind: 'income', typeId: v.typeId, name: t.name, amount: v.amount, date: dt, auto: false }); toast('Revenu ajouté, semaines recalculées'); });
   },
   addCharge(ym) {
     form('Charge — ' + fmonth(ym), [{ k: 'name', l: 'Libellé', ph: 'ex. Réparation voiture' }, { k: 'amount', l: 'Montant (F CFP)', t: 'money' }], {},
@@ -828,9 +882,9 @@ const A = {
   editItem(id) {
     const it = S.monthItems.find(i => i.id === id);
     const fields = [{ k: 'amount', l: 'Montant (F CFP)', t: 'money' }];
-    if (it.kind === 'income') fields.push({ k: 'date', l: 'Date de réception', t: 'date', help: 'Réparti à partir de cette date jusqu’à la fin du mois.' });
+    if (it.kind === 'income') fields.push({ k: 'date', l: 'Compté à partir du', t: 'date', help: 'Réparti à partir de cette date jusqu’à la fin de la période de ce revenu.' });
     form(it.name + ' — ' + fmonth(it.month), fields, it,
-      v => put('monthItems', { ...it, amount: v.amount, date: v.date || it.date, auto: false }),
+      v => { const n = { ...it, amount: v.amount, date: v.date || it.date, auto: false }; if (it.kind === 'income' && v.date && v.date !== it.date) n.month = pOf(v.date, incDay(incTypeOf(it.typeId))); put('monthItems', n); },
       () => remove('monthItems', id));
   },
   incomeType(id) {
@@ -840,8 +894,9 @@ const A = {
       { k: 'variable', l: 'Montant variable (je saisis le montant réel chaque mois à réception)', t: 'chk' },
       { k: 'amount', l: 'Montant mensuel (fixe) ou montant habituel (variable)', t: 'money' },
       { k: 'estimate', l: 'Si variable : compter ce montant habituel en attendant le montant réel', t: 'chk', help: 'Décoché (prudent) : le revenu variable n’est compté qu’une fois reçu et saisi. Coché : le montant habituel est compté dès le début du mois, puis remplacé par le montant réel.' },
-      { k: 'active', l: 'Actif', t: 'chk' }], t,
-      v => { if (!v.name) { toast('Nom requis'); return false; } const n = { ...t, ...v }; put('incomeTypes', n); syncType('income', n); },
+      { k: 'periodDay', l: 'Période couverte par ce revenu', t: 'select', o: Array.from({ length: 28 }, (_, i) => ({ v: String(i + 1), l: i === 0 ? 'Du 1er à la fin du mois' : `Du ${i + 1} au ${i} du mois suivant` })), help: 'Ex. salaire versé le 25 : « du 25 au 24 ». Revenu facturé le 1er : « du 1er à la fin du mois ». Le montant est réparti sur cette période.' },
+      { k: 'active', l: 'Actif', t: 'chk' }], { ...t, periodDay: String(incDay(t)) },
+      v => { if (!v.name) { toast('Nom requis'); return false; } const n = { ...t, ...v, periodDay: +v.periodDay }; put('incomeTypes', n); syncType('income', n); },
       id ? () => { syncType('income', t, true); remove('incomeTypes', id); } : null);
   },
   chargeType(id) {
