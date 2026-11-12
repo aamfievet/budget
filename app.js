@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.3.1';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 // Moteur de lecture (Tesseract.js 5.1.1, licence Apache 2.0) hébergé avec l'app, dans le dossier tesseract/
@@ -227,7 +227,26 @@ function render() {
   $('#fab').classList.toggle('hidden', ui.tab === 'settings');
   const v = $('#view');
   v.innerHTML = ui.tab === 'week' ? viewWeek() : ui.tab === 'month' ? viewMonth() : viewSettings();
-  loadThumbs();
+  loadThumbs(); prettySelects(v);
+}
+/* Listes déroulantes aux couleurs de l'app : la liste native du téléphone (grise) est remplacée
+   par une liste intégrée. Le vrai <select> reste caché et reçoit la valeur choisie. */
+function prettySelects(root) {
+  root.querySelectorAll('select:not([data-pretty])').forEach(sel => {
+    sel.dataset.pretty = '1'; sel.style.display = 'none';
+    const box = document.createElement('div'); box.className = 'psel';
+    const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'psel-btn';
+    const list = document.createElement('div'); list.className = 'psel-list hidden';
+    const label = () => { btn.innerHTML = `<span>${esc(sel.selectedOptions[0] ? sel.selectedOptions[0].text : '')}</span><i>⌄</i>`; };
+    [...sel.options].forEach(o => {
+      const it = document.createElement('button'); it.type = 'button'; it.className = 'psel-item'; it.textContent = o.text; it.dataset.v = o.value;
+      it.onclick = () => { sel.value = o.value; label(); list.classList.add('hidden'); box.classList.remove('open'); list.querySelectorAll('.psel-item').forEach(x => x.classList.toggle('on', x.dataset.v === sel.value)); sel.dispatchEvent(new Event('change', { bubbles: true })); };
+      if (o.value === sel.value) it.classList.add('on');
+      list.appendChild(it);
+    });
+    btn.onclick = () => { const open = list.classList.toggle('hidden') === false; box.classList.toggle('open', open); if (open) { const on = list.querySelector('.on'); if (on) list.scrollTop = on.offsetTop - list.clientHeight / 2; } };
+    label(); box.append(btn, list); sel.after(box);
+  });
 }
 function status(remain, avail) { if (remain < 0) return 'bad'; if (avail === 0 && remain === 0) return 'ok'; if (avail <= 0) return remain > 0 ? 'ok' : 'bad'; return remain / avail < 0.25 ? 'warn' : 'ok'; }
 const catOf = id => S.categories.find(c => c.id === id) || { name: 'Sans catégorie', icon: '❔' };
@@ -410,7 +429,7 @@ function viewSettings() {
 }
 
 /* ---------- Feuille modale ---------- */
-function sheet(html) { const s = $('#sheet'); const wasOpen = !s.classList.contains('hidden'); s.querySelector('.sheet-body').innerHTML = html; s.classList.remove('hidden'); document.body.style.overflow = 'hidden'; if (!wasOpen) history.pushState({ sheet: 1 }, ''); }
+function sheet(html) { const s = $('#sheet'); const wasOpen = !s.classList.contains('hidden'); s.querySelector('.sheet-body').innerHTML = html; prettySelects(s); s.classList.remove('hidden'); document.body.style.overflow = 'hidden'; if (!wasOpen) history.pushState({ sheet: 1 }, ''); }
 function closeSheet(fromHistory) { const s = $('#sheet'); if (s.classList.contains('hidden')) return; s.classList.add('hidden'); document.body.style.overflow = ''; if (fromHistory !== true && history.state && history.state.sheet) { ignorePop = true; history.back(); } }
 $('#sheet .sheet-bg').onclick = closeSheet;
 

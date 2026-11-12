@@ -156,3 +156,19 @@ label.chk input{width:24px;height:24px;min-height:0;accent-color:var(--accent)}
 .choice-btn b{font-size:18px} .choice-btn small{color:var(--muted)}
 
 .nav-spacer{width:44px;flex:none}
+
+/* Listes déroulantes aux couleurs de l'app */
+.psel{position:relative}
+.psel-btn{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:12px 14px;min-height:50px;color:var(--text);font-weight:500}
+.psel-btn i{font-style:normal;font-size:20px;line-height:1;color:var(--accent);transition:transform .2s}
+.psel.open .psel-btn{border-color:var(--accent)}
+.psel.open .psel-btn i{transform:rotate(180deg)}
+.psel-list{margin-top:6px;max-height:260px;overflow:auto;background:var(--card2);border:1px solid var(--line);border-radius:16px;padding:6px;box-shadow:var(--shadow)}
+.psel-item{display:block;width:100%;text-align:left;background:none;border:0;border-radius:12px;padding:11px 12px;color:var(--text);font-size:15px}
+.psel-item.on{background:var(--grad);color:#fff;font-weight:600}
+.psel-btn span,label.f .psel-btn span{display:inline;text-transform:none;letter-spacing:0;margin:0;font-size:16px;font-weight:500;color:var(--text)}
+/* Cases à cocher aux couleurs de l'app */
+label.chk input[type=checkbox]{appearance:none;-webkit-appearance:none;flex:none;width:26px;height:26px;border-radius:9px;border:2px solid var(--faint);background:var(--card);display:inline-grid;place-content:center;padding:0;cursor:pointer}
+label.chk input[type=checkbox]::after{content:"✓";color:#fff;font-size:16px;font-weight:800;transform:scale(0);transition:transform .12s}
+label.chk input[type=checkbox]:checked{background:var(--grad);border-color:transparent;box-shadow:var(--glow)}
+label.chk input[type=checkbox]:checked::after{transform:scale(1)}
