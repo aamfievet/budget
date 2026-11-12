@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.8.1';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
@@ -469,7 +469,11 @@ function damagedDate(text, min, max) {
 /* Enseignes connues (Nouvelle-Calédonie) : servent à reconnaître le magasin malgré les erreurs de lecture.
    Les mots-clés des catégories (Réglages) sont aussi utilisés. */
 const SHOPS = ['Carrefour Market', 'Carrefour', 'Champion', 'Géant Casino', 'Casino', 'Super U', 'Hyper U', 'Leader Price', 'Korail',
-  'Johnston', 'Ballande', 'Pacific Energy', 'Total', 'Mobil', 'Pharmacie', 'Mr Bricolage', 'Bricorama', 'Pacific Food', 'Discount'];
+  'Johnston', 'Ballande', 'Pacific Energy', 'Helia', 'Total', 'Mobil', 'Pharmacie', 'Mr Bricolage', 'Bricorama', 'Pacific Food', 'Discount'];
+/* Stations-service connues : classées d'office en Carburant */
+const FUEL = ['Helia', 'Pacific Energy', 'Total', 'Mobil', 'Shell', 'Station'];
+const fuelCat = name => name && FUEL.some(f => fuelMatch(name, f)) ? S.categories.find(c => /carburant|essence/i.test(c.name)) : null;
+const fuelMatch = (a, b) => fuzzyMatch(a, b) !== null && fuzzyMatch(a, b) !== undefined;
 const compact = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/[^A-Z]/g, '');
 function lev(a, b) {
   const m = a.length, n = b.length; let prev = Array.from({ length: n + 1 }, (_, j) => j);
@@ -561,7 +565,7 @@ function parseReceipt(text, anchor) {
   // Catégorie : d'abord d'après le magasin reconnu, puis d'après les mots-clés (lecture tolérante aux erreurs)
   const kw = c => (c.keywords || '').split(',').map(k => k.trim()).filter(Boolean);
   let cat = null;
-  if (st) cat = S.categories.find(c => kw(c).some(k => compact(st.name).includes(compact(k)) || (st.known && compact(st.known).includes(compact(k)))));
+  if (st) cat = fuelCat(st.known || st.name) || S.categories.find(c => kw(c).some(k => compact(st.name).includes(compact(k)) || (st.known && compact(st.known).includes(compact(k)))));
   if (!cat) cat = S.categories.find(c => kw(c).some(k => k.toLowerCase() !== 'total' && (k.length >= 4 ? lines.some(l => fuzzyIn(l, k) >= 0) : text.toLowerCase().includes(k.toLowerCase()))));
   if (cat) res.categoryId = cat.id;
   if (isCardSlip(lines)) Object.assign(res, parseCardSlip(lines, anchor, res));
@@ -605,7 +609,7 @@ function parseCardSlip(lines, anchor, generic) {
   // Catégorie d'après le commerçant (docteur / pharmacie → Santé, sinon mots-clés)
   if (out.store) {
     const kw = c => (c.keywords || '').split(',').map(k => k.trim()).filter(k => k.length >= 4);
-    let cat = /^(dr|docteur|pharmacie|cabinet|laboratoire|kin[ée])\b/i.test(out.store) ? S.categories.find(c => /sant[ée]/i.test(c.name)) : null;
+    let cat = /^(dr|docteur|pharmacie|cabinet|laboratoire|kin[ée])\b/i.test(out.store) ? S.categories.find(c => /sant[ée]/i.test(c.name)) : fuelCat(out.store);
     cat = cat || S.categories.find(c => kw(c).some(k => fuzzyMatch(out.store, k)));
     out.categoryId = cat ? cat.id : undefined;
   } else out.categoryId = undefined;
