@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '2.4.2';
+const APP_VERSION = '2.4.3';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 // Moteur de lecture (Tesseract.js 5.1.1, licence Apache 2.0) hébergé avec l'app, dans le dossier tesseract/
@@ -740,13 +740,18 @@ function parseReceipt(text, anchor) {
     lines.forEach(l => {
       if (/(total|net\s|tva|tgc|\bht\b|ttc|carte|bancaire|esp[eè]ces|rendu|ticket|articles?|lignes?)/i.test(l)) return;
       const prices = [...l.matchAll(/(\d{1,3}(?:[ .\u00a0]\d{3})+|\d+)\s*F(?![a-z])/gi)];
-      if (!prices.length) return;
+      if (!prices.length || prices.length >= 3 || /%\s*\d/.test(l)) return; // ligne du tableau des taxes (taux % + HT + TVA + TTC) : pas un article
       const isItem = /\b\d+\s*[xX×]\s/.test(l) || /F\s*\/\s*kg/i.test(l) || prices.length >= 2;
       if (!isItem) return;
       const v = parseInt(prices[prices.length - 1][1].replace(/\D/g, ''), 10);
       if (v > 0 && v < 1000000) { sum += v; n++; }
     });
     if (n >= 2 && sum > (res.amount || 0)) { res.amount = sum; res.fromItems = true; }
+    // Tableau des taxes : la dernière colonne (Mt.TTC) de chaque taux, additionnée, donne aussi le total
+    let ttc = 0, rows = 0; const ttcCol = lines.some(l => /(tva|taux|tgc)/i.test(l) && /t\.?t\.?c\s*$/i.test(l.trim())); // tableau dont la dernière colonne est le TTC
+    if (ttcCol) lines.forEach(l => { if (!/%\s*\d/.test(l)) return; const pr = [...l.matchAll(/(\d{1,3}(?:[ .\u00a0]\d{3})+|\d+)\s*F(?![a-z])/gi)]; if (pr.length >= 2) { ttc += parseInt(pr[pr.length - 1][1].replace(/\D/g, ''), 10); rows++; } });
+    if (ttc > 0 && ttc === res.amount) res.amountSure = true;                 // articles et taxes concordent
+    else if (ttc > 0 && !res.fromItems) { res.amount = ttc; res.fromItems = true; }
   }
   if (!score.size && !res.amount) {
     const cand = []; lines.forEach(l => { if (!/\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}|t[ée]l|ridet/i.test(l)) cand.push(...parseNumbers(l)); });
