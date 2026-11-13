@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '2.4.1';
+const APP_VERSION = '2.4.2';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 // Moteur de lecture (Tesseract.js 5.1.1, licence Apache 2.0) hébergé avec l'app, dans le dossier tesseract/
@@ -533,11 +533,12 @@ async function ocrReceipt(img, anchor, onProgress) {
       text += (text ? '\n—— lecture ' + pass + ' ——\n' : '') + t;
       if (!r) r = x;
       else {
-        if (x.amount && x.amountSure && !r.amountSure) { r.amount = x.amount; r.amountSure = true; }
-        ['amount', 'date', 'store'].forEach(k => { if (!r[k] && x[k]) r[k] = x[k]; });
+        if ((x.amountQ ?? -1) > (r.amountQ ?? -1)) { r.amount = x.amount; r.amountQ = x.amountQ; r.amountSure = x.amountSure; r.fromItems = x.fromItems; }
+        if ((x.storeQ || 0) > (r.storeQ || 0)) { r.store = x.store; r.storeQ = x.storeQ; if (x.categoryId) r.categoryId = x.categoryId; }
+        ['date'].forEach(k => { if (!r[k] && x[k]) r[k] = x[k]; });
         if (!r.categoryId && x.categoryId) r.categoryId = x.categoryId;
       }
-      if (r.amount && r.amountSure && r.date && r.store) break;
+      if (r.amount && r.amountSure && r.date && r.store && (r.storeQ === 2 || pass >= 2)) break;
       pass++;
     }
     r.rawStore = r.store; applyAliases(r);
@@ -732,12 +733,29 @@ function parseReceipt(text, anchor) {
   if (score.size) {
     res.amount = [...score.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0][0];
     res.amountSure = sure.has(res.amount);
-  } else {
+  }
+  // Pas de total lisible : on additionne les prix des articles (dernier prix de chaque ligne « 1x … 990 F 990 F » ou « … F/kg 681 F »)
+  if (!res.amountSure) {
+    let sum = 0, n = 0;
+    lines.forEach(l => {
+      if (/(total|net\s|tva|tgc|\bht\b|ttc|carte|bancaire|esp[eè]ces|rendu|ticket|articles?|lignes?)/i.test(l)) return;
+      const prices = [...l.matchAll(/(\d{1,3}(?:[ .\u00a0]\d{3})+|\d+)\s*F(?![a-z])/gi)];
+      if (!prices.length) return;
+      const isItem = /\b\d+\s*[xX×]\s/.test(l) || /F\s*\/\s*kg/i.test(l) || prices.length >= 2;
+      if (!isItem) return;
+      const v = parseInt(prices[prices.length - 1][1].replace(/\D/g, ''), 10);
+      if (v > 0 && v < 1000000) { sum += v; n++; }
+    });
+    if (n >= 2 && sum > (res.amount || 0)) { res.amount = sum; res.fromItems = true; }
+  }
+  if (!score.size && !res.amount) {
     const cand = []; lines.forEach(l => { if (!/\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}|t[ée]l|ridet/i.test(l)) cand.push(...parseNumbers(l)); });
     if (cand.length) res.amount = Math.max(...cand);
   }
+  // qualité du montant : 3 = ligne de total, 2 = somme des articles, 1 = montant en F, 0 = au hasard
+  res.amountQ = !res.amount ? -1 : res.amountSure ? 3 : res.fromItems ? 2 : score.size ? 1 : 0;
   const dt = findDate(text, anchor); if (dt) res.date = dt;
-  const st = findStore(lines); if (st) res.store = st.name;
+  const st = findStore(lines); if (st) { res.store = st.name; res.storeQ = st.known ? 2 : 1; }
   // Catégorie : d'abord d'après le magasin reconnu, puis d'après les mots-clés (lecture tolérante aux erreurs)
   const kw = c => (c.keywords || '').split(',').map(k => k.trim()).filter(Boolean);
   let cat = null;
@@ -758,11 +776,11 @@ function parseCardSlip(lines, anchor, generic) {
   // Montant : le nombre suivi de XPF (en bas à droite, en gras), sinon la ligne sous « MONTANT : »
   const xl = lines.filter(l => !/solde|reste|plafond|dispo/i.test(l)).map(l => ({ l, m: l.match(/(\d{1,3}(?:[ .\u00a0]\d{3})+|\d+)\s*X\s*P\s*F/i) })).filter(x => x.m);
   const xm = xl.find(x => /mont/i.test(x.l)) || xl[xl.length - 1];
-  if (xm) { out.amount = parseInt(xm.m[1].replace(/\D/g, ''), 10); out.amountSure = true; }
+  if (xm) { out.amount = parseInt(xm.m[1].replace(/\D/g, ''), 10); out.amountSure = true; out.amountQ = 3; }
   else {
     const i = lines.findIndex(l => /mont\s*a\s*n\s*t/i.test(l));
     const n = i >= 0 ? parseNumbers(lines.slice(i, i + 2).join(' ')).filter(x => x >= 10) : [];
-    out.amount = n.length ? n[0] : undefined; // pas de montant lisible : on laisse vide plutôt que de prendre un numéro de carte
+    out.amount = n.length ? n[0] : undefined; out.amountQ = n.length ? 2 : -1; // pas de montant lisible : on laisse vide plutôt que de prendre un numéro de carte
   }
   // Date : la ligne qui commence par « LE » (juste après la ligne « CB »), suivie de « A hh:mm:ss »
   let li = lines.findIndex(l => /^\W*[LH1I|][E3]\s/i.test(l) && /\d/.test(l));
@@ -781,7 +799,7 @@ function parseCardSlip(lines, anchor, generic) {
       const tc = s => s.toLowerCase().replace(/(^|\s)\p{L}/gu, c => c.toUpperCase());
       let full = tc(name);
       if (known) { const m = fuzzyMatch(name, known); let acc = 0; const rest = []; name.split(/\s+/).forEach(w => { const c = compact(w).length; if (acc >= m.end && c) rest.push(w); acc += c; }); full = [tc(known), ...rest.map(tc)].join(' '); } // enseigne bien écrite + le reste (ex. « Auchan Auteuil »)
-      out.store = full.slice(0, 30);
+      out.store = full.slice(0, 30); out.storeQ = 2;
     } else out.store = null;
   }
   if (out.date === null) delete out.date;
@@ -862,7 +880,7 @@ async function handlePhoto(file) {
     const f = $('#ef'); if (!f) return;
     draft.ocrStore = r.rawStore || r.store || null;
     const found = [];
-    if (r.amount) { f.amount.value = r.amount; found.push('montant ' + fmt(r.amount)); }
+    if (r.amount) { f.amount.value = r.amount; found.push('montant ' + fmt(r.amount) + (r.fromItems && !r.amountSure ? ' (total illisible : somme des articles)' : '')); }
     if (r.date) { f.date.value = r.date; found.push('date ' + fshort(r.date)); }
     const noDate = !r.date;
     if (noDate && shot <= today()) f.date.value = shot;
