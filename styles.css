@@ -172,3 +172,7 @@ label.chk input[type=checkbox]{appearance:none;-webkit-appearance:none;flex:none
 label.chk input[type=checkbox]::after{content:"✓";color:#fff;font-size:16px;font-weight:800;transform:scale(0);transition:transform .12s}
 label.chk input[type=checkbox]:checked{background:var(--grad);border-color:transparent;box-shadow:var(--glow)}
 label.chk input[type=checkbox]:checked::after{transform:scale(1)}
+/* v2.4.5 : jamais de défilement horizontal (écrans étroits, téléphones pliants) */
+html,body{max-width:100%;overflow-x:hidden}
+.row .mid small,.help,.banner,.empty,.ocr{overflow-wrap:anywhere;word-break:break-word}
+.row .mid small{display:block}

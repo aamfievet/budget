@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '2.4.4';
+const APP_VERSION = '2.4.5';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 // Moteur de lecture (Tesseract.js 5.1.1, licence Apache 2.0) hébergé avec l'app, dans le dossier tesseract/
@@ -448,7 +448,7 @@ function viewSettings() {
   if (tV) h += `<div class="row total-row"><span class="ico">≈</span><div class="mid"><div>Avec les revenus variables</div><small>en comptant leurs montants habituels</small></div><div class="amt ${tI + tV - tC < 0 ? 'neg' : 'pos'}">${fmt(tI + tV - tC)}</div></div>`;
   h += `</div><p class="help">Une modification s’applique au mois en cours et aux suivants. Pour un changement ponctuel, modifie la ligne dans l’onglet Mois.</p></div>`;
   h += `<div class="section"><h2>Catégories de dépenses <button onclick="A.category()">+ Ajouter</button></h2><div class="list">`;
-  S.categories.forEach(c => h += `<div class="row" onclick="A.category('${c.id}')"><span class="ico" style="--h:${catHue(c.id)}">${c.icon}</span><div class="mid"><div>${esc(c.name)}</div><small>${esc(c.keywords || 'aucun mot-clé')}</small></div></div>`);
+  S.categories.forEach(c => h += `<div class="row" onclick="A.category('${c.id}')"><span class="ico" style="--h:${catHue(c.id)}">${c.icon}</span><div class="mid"><div>${esc(c.name)}</div><small>${esc((c.keywords || '').split(',').map(k => k.trim()).filter(Boolean).join(', ') || 'aucun mot-clé')}</small></div></div>`);
   h += `</div></div>`;
   h += `<div class="section"><h2>Options</h2><div class="list" style="padding:4px 14px">
     <label class="chk"><input type="checkbox" ${st.carryOver ? 'checked' : ''} onchange="A.setCarry(this.checked)"> Reporter le reste (ou le dépassement) sur la semaine suivante</label>
