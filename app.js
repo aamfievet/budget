@@ -2,7 +2,7 @@
 /* Budget Hebdo — application de budget hebdomadaire (XPF)
    Données stockées localement (IndexedDB) + sauvegarde Google Drive. */
 
-const APP_VERSION = '2.4.0';
+const APP_VERSION = '2.4.1';
 const DRIVE_FOLDER = 'Budget Hebdo';
 const DRIVE_DATA = 'budget-data.json';
 // Moteur de lecture (Tesseract.js 5.1.1, licence Apache 2.0) hébergé avec l'app, dans le dossier tesseract/
@@ -524,16 +524,21 @@ async function ocrReceipt(img, anchor, onProgress) {
   const worker = await Tesseract.createWorker('fra', 1, { ...TESS_OPTS, logger: m => m.status === 'recognizing text' && onProgress && onProgress(pass, Math.round(m.progress * 100)) });
   try {
     const canvas = drawScaled(img, 1800, true);
-    await worker.setParameters({ tessedit_pageseg_mode: '3' });
-    const t1 = (await worker.recognize(canvas)).data.text || '';
-    const r = parseReceipt(t1, anchor); let text = t1;
-    if (!r.amount || !r.date || !r.store) {
-      pass = 2; await worker.setParameters({ tessedit_pageseg_mode: '6' });
-      const t2 = (await worker.recognize(canvas)).data.text || '';
-      const r2 = parseReceipt(t2, anchor);
-      ['amount', 'date', 'store'].forEach(k => { if (!r[k] && r2[k]) r[k] = r2[k]; });
-      if (!r.categoryId && r2.categoryId) r.categoryId = r2.categoryId;
-      text = t1 + '\n—— 2e lecture ——\n' + t2;
+    // Modes de lecture : 4 = une colonne (tickets), 6 = bloc unique, 3 = automatique. On s'arrête dès que tout est trouvé et le montant sûr.
+    let r = null, text = '';
+    for (const mode of ['4', '6', '3']) {
+      await worker.setParameters({ tessedit_pageseg_mode: mode });
+      const t = (await worker.recognize(canvas)).data.text || '';
+      const x = parseReceipt(t, anchor);
+      text += (text ? '\n—— lecture ' + pass + ' ——\n' : '') + t;
+      if (!r) r = x;
+      else {
+        if (x.amount && x.amountSure && !r.amountSure) { r.amount = x.amount; r.amountSure = true; }
+        ['amount', 'date', 'store'].forEach(k => { if (!r[k] && x[k]) r[k] = x[k]; });
+        if (!r.categoryId && x.categoryId) r.categoryId = x.categoryId;
+      }
+      if (r.amount && r.amountSure && r.date && r.store) break;
+      pass++;
     }
     r.rawStore = r.store; applyAliases(r);
     return { r, text };
@@ -632,9 +637,10 @@ function damagedDate(text, min, max) {
 /* Enseignes connues (Nouvelle-Calédonie) : servent à reconnaître le magasin malgré les erreurs de lecture.
    Les mots-clés des catégories (Réglages) sont aussi utilisés. */
 const SHOPS = ['Carrefour Market', 'Carrefour', 'Champion', 'Géant Casino', 'Casino', 'Super U', 'Hyper U', 'Leader Price', 'Korail',
-  'Johnston', 'Ballande', 'Pacific Energy', 'Helia', 'Total', 'Mobil', 'Pharmacie', 'Mr Bricolage', 'Bricorama', 'Pacific Food', 'Discount'];
+  'Johnston', 'Ballande', 'Auchan', 'Pacific Energy', 'Helia', 'Total', 'Mobil', 'Pharmacie', 'Mr Bricolage', 'Bricorama', 'Pacific Food', 'Discount'];
 /* Stations-service connues : classées d'office en Carburant */
 const FUEL = ['Helia', 'Pacific Energy', 'Total', 'Mobil', 'Shell', 'Station'];
+const foodCat = name => name && /(aliment|market|superette|sup[ée]rette|[ée]picerie|supermarch|hypermarch|auchan)/i.test(name) ? S.categories.find(c => /courses|alimentation/i.test(c.name)) : null;
 const fuelCat = name => name && FUEL.some(f => fuelMatch(name, f)) ? S.categories.find(c => /carburant|essence/i.test(c.name)) : null;
 const fuelMatch = (a, b) => fuzzyMatch(a, b) !== null && fuzzyMatch(a, b) !== undefined;
 const compact = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/[^A-Z]/g, '');
@@ -647,21 +653,26 @@ function lev(a, b) {
    Renvoie la meilleure correspondance {start, end, d} (en lettres) ou null. */
 function fuzzyMatch(line, k) {
   const L = compact(line), K = compact(k); if (K.length < 4 || L.length < K.length - 1) return null;
+  // débuts et fins de mots (en lettres) : la correspondance doit commencer au début d'un mot et finir à la fin d'un mot (±1 lettre)
+  const starts = new Set(), ends = new Set(); let acc = 0;
+  line.split(/[^\p{L}]+/u).forEach(w => { const c = compact(w).length; if (!c) return; starts.add(acc); acc += c; ends.add(acc); });
+  const near = (set, x) => set.has(x) || set.has(x - 1) || set.has(x + 1);
   const tol = Math.floor(K.length / 4); let best = null;
   for (let len = K.length - 1; len <= K.length + 1; len++)
     for (let i = 0; i + len <= L.length; i++) {
+      if (!near(starts, i) || !near(ends, i + len)) continue;
       const d = lev(L.substr(i, len), K) + (len !== K.length ? 0.5 : 0);
       if (Math.floor(d) <= tol && (!best || d < best.d || (d === best.d && i < best.start))) best = { start: i, end: i + len, d };
     }
   return best;
 }
 const fuzzyIn = (line, k) => fuzzyMatch(line, k) ? 1 : -1;
-const HEADER_JUNK = /(description|\bqt[ée]\b|montant|nontant|\btaux\b|article|divers|payer|totaux|\bprix\b|quantit|t[ée]l\b|t[ée]l\s*:|ridet|rc\s|siret|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|\d+h\d*|horaire|bienvenue|merci|www|\S@\S|\brue\b|route|bp\s?\d|bp\b|nou[mn][ée]a)/i;
+const HEADER_JUNK = /(\btotal\s*(ht|ttc|divers)|net\s*t|\bticket\b|caiss|impression|sous\s*affili|commer[cç]ant|description|\bqt[ée]\b|montant|nontant|\btaux\b|article|divers|payer|totaux|\bprix\b|quantit|t[ée]l\b|t[ée]l\s*:|ridet|rc\s|siret|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|\d+h\d*|horaire|bienvenue|merci|www|\S@\S|\brue\b|route|bp\s?\d|bp\b|nou[mn][ée]a)/i;
 function findStore(lines) {
-  const head = lines.slice(0, 10).concat(lines.length > 10 ? lines.slice(-6) : []);
+  const top = lines.slice(0, 10), bottom = lines.length > 10 ? lines.slice(-6) : [];
   const names = SHOPS.concat(S.categories.flatMap(c => (c.keywords || '').split(',').map(k => k.trim()).filter(k => k.length >= 4 && k.toLowerCase() !== 'total')));
   // 1) une enseigne connue dans l'en-tête : on garde l'enseigne bien écrite + la suite de la ligne (ex. « Champion Robinson »)
-  for (const l of head) {
+  const known = list => { for (const l of list) {
     if (HEADER_JUNK.test(l) || (/(total|payer|montant|carte|cb\b)/i.test(l) && /\d/.test(l))) continue;
     const hit = names.map(n => ({ n, m: fuzzyMatch(l, n) })).filter(x => x.m)
       .sort((a, b) => a.m.start - b.m.start || compact(b.n).length - compact(a.n).length)[0];
@@ -672,23 +683,24 @@ function findStore(lines) {
       const brand = hit.n.toLowerCase().replace(/(^|\s)\p{L}/gu, c => c.toUpperCase());
       return { name: [brand, ...tail].join(' ').slice(0, 30), known: hit.n };
     }
-  }
+  } return null; };
+  const k1 = known(top); if (k1) return k1;
   // 2) sinon la ligne d'en-tête la plus « propre » (mots de 3 lettres ou plus), en retirant les débris de logo
   let best = null, bestScore = 0;
-  head.forEach((l, i) => {
-    if (i >= 10) return;
+  top.forEach((l, i) => {
     if (HEADER_JUNK.test(l) || /\d{3,}/.test(l)) return;
     const words = l.split(/\s+/).filter(w => /^[\p{L}'&-]{3,}$/u.test(w));
     const score = words.reduce((s, w) => s + w.length, 0) - i; // un peu de bonus aux premières lignes
     if (words.length && score > bestScore) { bestScore = score; best = words.join(' '); }
   });
-  return best ? { name: best.slice(0, 30) } : null;
+  if (best) return { name: best.replace(/\p{L}+/gu, w => w.length > 2 ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w).slice(0, 30) };
+  return known(bottom);
 }
 function parseReceipt(text, anchor) {
   const lines = text.split(/\n/).map(l => l.trim().replace(/(?<=\d)[oO](?=[\dF\s]|$)/g, '0')).filter(Boolean); const res = {};
   // Montant : on note chaque nombre candidat (lignes TOTAL / À PAYER / CB, nombres suivis de F ou XPF)
-  const prio = /(t?otal|net\s*[aà]\s*payer|[aà]\s*payer|montant|esp[eè]ces|carte|bancaire|cb\b|xpf)/i, excl = /(sous[\s-]*total|tgc|tva|taxe|hors\s*taxe|rendu|monnaie|[ée]conomi|remise|fid[ée]lit|points?|article)/i;
-  const score = new Map(); const add = (n, s) => score.set(n, (score.get(n) || 0) + s);
+  const prio = /(t?otal|net\s*[aà]\s*payer|[aà]\s*payer|montant|esp[eè]ces|carte|bancaire|cb\b|xpf|ticket\s*r)/i, excl = /(sous[\s-]*total|tgc|tva|taxe|hors\s*taxe|rendu|monnaie|[ée]conomi|remise|fid[ée]lit|points?|article)/i;
+  const score = new Map(), sure = new Set(); const add = (n, s) => score.set(n, (score.get(n) || 0) + s);
   // Bloc des taxes (TGC / TVA / Hors Taxe) : on l'écarte, mais on s'en sert pour vérifier le total (HT + TGC = TTC)
   const taxHead = /(hors\s*taxe|\bH\.?T\.?\b|\bTGC\b|\bTVA\b|taxe)/i, totalWord = /(t?otal|[aà]\s*payer|net\s)/i;
   let taxRows = 0; const taxNums = [];
@@ -700,7 +712,7 @@ function parseReceipt(text, anchor) {
     if (excl.test(l) || /t[ée]l|ridet/i.test(l)) return;
     const clean = l.replace(/\d{1,2}\s*[\/.-]\s*\d{1,2}\s*[\/.-]\s*\d{2,4}/g, ' ');
     const isPrio = prio.test(l), isTotal = totalWord.test(l);
-    parseNumbers(clean).forEach(n => { if (isPrio && n >= 10) add(n, isTotal ? 2.5 : 1.5); });
+    parseNumbers(clean).forEach(n => { if (isPrio && n >= 10) { add(n, isTotal ? 2.5 : 1.5); if (isTotal) sure.add(n); } });
     let m; const reF = /(\d{1,3}(?:[ . ]\d{3})+|\d+)\s*(?:F\b|F(?=\s|$)|XPF|CFP)/gi;
     while ((m = reF.exec(clean))) { const n = parseInt(m[1].replace(/[ . ]/g, ''), 10); if (n >= 10 && n < 5000000) add(n, 2); }
   });
@@ -710,15 +722,16 @@ function parseReceipt(text, anchor) {
   const sums = new Set(); taxNums.forEach(a => taxNums.forEach(b => { if (a > b) sums.add(a + b); }));
   ht.forEach(n => { if (score.has(n) && !sums.has(n)) add(n, -3); }); // un montant du bloc HT/TGC n'est pas le total
   // Priorité à la ligne « TOTAL À PAYER » (ou NET À PAYER, TOTAL TTC, MONTANT DÛ) quand elle est lisible
-  const payLine = /([aà]\s*pa[yv][eé]|total\s*t\.?t\.?c|montant\s*d[uû]|net\s*[aà])/i;
+  const payLine = /([aà]\s*pa[yv][eé]|total\s*t\.?t\.?c|net\s*t\.?t\.?c|montant\s*d[uû]|net\s*[aà])/i;
   lines.forEach(l => {
     if (!payLine.test(l)) return;
     const nums = parseNumbers(l.replace(/\d+\s*articles?\S*/i, ' ')).filter(n => n >= 10);
-    if (nums.length) add(Math.max(...nums), 6);
+    if (nums.length) { add(Math.max(...nums), 6); sure.add(Math.max(...nums)); }
   });
   if (!score.size) for (const a of taxNums) for (const b of taxNums) if (a > b) add(a + b, 1);
   if (score.size) {
     res.amount = [...score.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0][0];
+    res.amountSure = sure.has(res.amount);
   } else {
     const cand = []; lines.forEach(l => { if (!/\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}|t[ée]l|ridet/i.test(l)) cand.push(...parseNumbers(l)); });
     if (cand.length) res.amount = Math.max(...cand);
@@ -728,7 +741,7 @@ function parseReceipt(text, anchor) {
   // Catégorie : d'abord d'après le magasin reconnu, puis d'après les mots-clés (lecture tolérante aux erreurs)
   const kw = c => (c.keywords || '').split(',').map(k => k.trim()).filter(Boolean);
   let cat = null;
-  if (st) cat = fuelCat(st.known || st.name) || S.categories.find(c => kw(c).some(k => compact(st.name).includes(compact(k)) || (st.known && compact(st.known).includes(compact(k)))));
+  if (st) cat = fuelCat(st.known || st.name) || foodCat(st.name) || S.categories.find(c => kw(c).some(k => compact(st.name).includes(compact(k)) || (st.known && compact(st.known).includes(compact(k)))));
   if (!cat) cat = S.categories.find(c => kw(c).some(k => k.toLowerCase() !== 'total' && (k.length >= 4 ? lines.some(l => fuzzyIn(l, k) >= 0) : text.toLowerCase().includes(k.toLowerCase()))));
   if (cat) res.categoryId = cat.id;
   if (isCardSlip(lines)) Object.assign(res, parseCardSlip(lines, anchor, res));
@@ -743,8 +756,9 @@ function isCardSlip(lines) {
 function parseCardSlip(lines, anchor, generic) {
   const out = {};
   // Montant : le nombre suivi de XPF (en bas à droite, en gras), sinon la ligne sous « MONTANT : »
-  const xpf = lines.map(l => l.match(/(\d{1,3}(?:[ . ]\d{3})+|\d+)\s*X\s*P\s*F/i)).filter(Boolean);
-  if (xpf.length) out.amount = parseInt(xpf[xpf.length - 1][1].replace(/\D/g, ''), 10);
+  const xl = lines.filter(l => !/solde|reste|plafond|dispo/i.test(l)).map(l => ({ l, m: l.match(/(\d{1,3}(?:[ .\u00a0]\d{3})+|\d+)\s*X\s*P\s*F/i) })).filter(x => x.m);
+  const xm = xl.find(x => /mont/i.test(x.l)) || xl[xl.length - 1];
+  if (xm) { out.amount = parseInt(xm.m[1].replace(/\D/g, ''), 10); out.amountSure = true; }
   else {
     const i = lines.findIndex(l => /mont\s*a\s*n\s*t/i.test(l));
     const n = i >= 0 ? parseNumbers(lines.slice(i, i + 2).join(' ')).filter(x => x >= 10) : [];
@@ -764,7 +778,10 @@ function parseCardSlip(lines, anchor, generic) {
     const name = words.join(' ');
     if (name && /\p{L}{3,}/u.test(name)) {
       const known = SHOPS.concat(S.categories.flatMap(c => (c.keywords || '').split(',').map(k => k.trim()).filter(k => k.length >= 4))).find(n => fuzzyMatch(name, n));
-      out.store = (known ? known.replace(/(^|\s)\p{L}/gu, c => c.toUpperCase()) : name.toLowerCase().replace(/(^|\s)\p{L}/gu, c => c.toUpperCase())).slice(0, 30);
+      const tc = s => s.toLowerCase().replace(/(^|\s)\p{L}/gu, c => c.toUpperCase());
+      let full = tc(name);
+      if (known) { const m = fuzzyMatch(name, known); let acc = 0; const rest = []; name.split(/\s+/).forEach(w => { const c = compact(w).length; if (acc >= m.end && c) rest.push(w); acc += c; }); full = [tc(known), ...rest.map(tc)].join(' '); } // enseigne bien écrite + le reste (ex. « Auchan Auteuil »)
+      out.store = full.slice(0, 30);
     } else out.store = null;
   }
   if (out.date === null) delete out.date;
@@ -772,7 +789,7 @@ function parseCardSlip(lines, anchor, generic) {
   // Catégorie d'après le commerçant (docteur / pharmacie → Santé, sinon mots-clés)
   if (out.store) {
     const kw = c => (c.keywords || '').split(',').map(k => k.trim()).filter(k => k.length >= 4);
-    let cat = /^(dr|docteur|pharmacie|cabinet|laboratoire|kin[ée])\b/i.test(out.store) ? S.categories.find(c => /sant[ée]/i.test(c.name)) : fuelCat(out.store);
+    let cat = /^(dr|docteur|pharmacie|cabinet|laboratoire|kin[ée])\b/i.test(out.store) ? S.categories.find(c => /sant[ée]/i.test(c.name)) : (fuelCat(out.store) || foodCat(out.store));
     cat = cat || S.categories.find(c => kw(c).some(k => fuzzyMatch(out.store, k)));
     out.categoryId = cat ? cat.id : undefined;
   } else out.categoryId = undefined;
@@ -841,7 +858,7 @@ async function handlePhoto(file) {
     const kb = Math.round(blob.size / 1024);
     const lm = file.lastModified ? new Date(file.lastModified) : new Date();
     const shot = lm.getFullYear() + '-' + pad(lm.getMonth() + 1) + '-' + pad(lm.getDate()); // jour de la photo
-    const { r, text } = await ocrReceipt(img, shot, (ps, pc) => { if ($('#ocr')) $('#ocr').textContent = `Photo : ${kb} Ko. Lecture du ticket${ps > 1 ? ' (2e passage)' : ''}… ${pc} %`; });
+    const { r, text } = await ocrReceipt(img, shot, (ps, pc) => { if ($('#ocr')) $('#ocr').textContent = `Photo : ${kb} Ko. Lecture du ticket${ps > 1 ? ' (' + ps + 'e passage)' : ''}… ${pc} %`; });
     const f = $('#ef'); if (!f) return;
     draft.ocrStore = r.rawStore || r.store || null;
     const found = [];
